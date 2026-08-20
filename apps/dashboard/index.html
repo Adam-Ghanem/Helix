@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Helix — Coordinate Intelligence</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #0b1020; color: #e5e7eb; }
+    body { margin: 0; padding: 32px; max-width: 1200px; margin-inline: auto; }
+    header { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; border-bottom: 1px solid #26324d; padding-bottom: 20px; }
+    h1 { margin: 0; letter-spacing: .04em; } .muted { color: #94a3b8; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 24px 0; }
+    .card { background: #111a30; border: 1px solid #26324d; border-radius: 12px; padding: 18px; }
+    .value { font-size: 28px; font-weight: 700; margin-top: 8px; }
+    table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 12px 8px; border-bottom: 1px solid #26324d; }
+    code { color: #93c5fd; } button { background: #2563eb; color: white; border: 0; border-radius: 8px; padding: 10px 14px; cursor: pointer; }
+    .error { color: #fca5a5; }
+  </style>
+</head>
+<body>
+  <header><div><h1>HELIX</h1><div class="muted">Coordinate Intelligence</div></div><button id="refresh">Refresh</button></header>
+  <section class="grid" id="cards"></section>
+  <section class="card"><h2>Recent executions</h2><div id="table" class="muted">Loading…</div></section>
+  <script>
+    const API = localStorage.getItem('HELIX_API') || 'http://localhost:8787';
+    async function get(path) { const r = await fetch(`${API}/api/v1${path}`); if (!r.ok) throw new Error(`API ${r.status}`); return r.json(); }
+    function card(label, value) { return `<div class="card"><div class="muted">${label}</div><div class="value">${value}</div></div>`; }
+    async function refresh() {
+      try {
+        const [health, agents, executions, events] = await Promise.all([get('/health'), get('/agents'), get('/executions'), get('/events')]);
+        document.querySelector('#cards').innerHTML = [card('Runtime', health.status), card('Provider', health.provider), card('Agents', agents.agents.length), card('Event sequence', health.sequence), card('Executions', executions.executions.length), card('Audit events', events.events.length)].join('');
+        document.querySelector('#table').innerHTML = `<table><thead><tr><th>ID</th><th>Goal</th><th>Status</th><th>Updated</th></tr></thead><tbody>${executions.executions.slice(-20).reverse().map(e => `<tr><td><code>${e.id}</code></td><td>${e.goal}</td><td>${e.status}</td><td>${e.updatedAt}</td></tr>`).join('')}</tbody></table>`;
+      } catch (error) { document.querySelector('#table').innerHTML = `<div class="error">${error.message}. Start the API at ${API}.</div>`; }
+    }
+    document.querySelector('#refresh').addEventListener('click', refresh); refresh();
+  </script>
+</body>
+</html>

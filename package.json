@@ -1,0 +1,26 @@
+{
+  "name": "helix",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Helix — a durable, policy-controlled autonomous multi-agent orchestration runtime.",
+  "type": "module",
+  "bin": {
+    "helix": "dist/apps/cli/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/tests/helix.test.js",
+    "test:src": "tsx --test tests/**/*.test.ts",
+    "dev:api": "tsx apps/api/src/index.ts",
+    "dev:cli": "tsx apps/cli/src/index.ts",
+    "format:check": "tsc -p tsconfig.json --noEmit",
+    "verify": "pnpm typecheck && pnpm build && pnpm test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

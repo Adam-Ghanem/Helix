@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.helix/
+*.events.jsonl
+*.snapshot.json
+coverage/
+.env
+.DS_Store

@@ -1,0 +1,17 @@
+flowchart TB
+  User[Human / automation] --> API[Versioned HTTP API]
+  User --> CLI[helix CLI]
+  API --> Runtime[Helix Runtime]
+  CLI --> Runtime
+  Runtime --> Router[Adaptive Router]
+  Runtime --> Planner[Validated Task DAG]
+  Runtime --> Scheduler[Lease Scheduler]
+  Runtime --> Agents[Agent Registry + Health]
+  Runtime --> Policy[Default-deny Policy + Approvals]
+  Runtime --> Provider[Provider Interface]
+  Runtime --> Events[Durable Event Store]
+  Events --> Replay[Replay + Snapshots]
+  Runtime --> Dashboard[Read-only Dashboard]
+  Policy -. guarded boundary .-> Tools[Tool / MCP adapters]
+  Events -. future adapter .-> Memory[Vector / graph memory]
+  Scheduler -. future federation .-> Nodes[Remote Helix nodes]
