@@ -6,7 +6,7 @@ Helix is an autonomous multi-agent operating system and orchestration runtime. T
 
 ## What is implemented in v0.1
 
-This repository contains a runnable vertical slice rather than a non-functional mock. It includes an append-only durable event store with replay and snapshots, idempotent event handling, a validated task-DAG engine, pluggable routing strategies, policy evaluation with approval gates, resource budgets, a lease-based local scheduler, structured cognition metadata, agent health and reputation tracking, a provider-neutral runtime, an HTTP API, a JSON-capable CLI, a TypeScript SDK, a dashboard shell, and unit/integration tests.
+This repository contains a runnable vertical slice rather than a non-functional mock. It includes an append-only durable event store with replay and snapshots, idempotent event handling, a validated task-DAG engine, pluggable routing strategies, policy evaluation with approval gates, resource budgets, a lease-based local scheduler, structured cognition metadata, agent health and reputation tracking, a provider-neutral runtime, lifecycle controls for pause/resume/cancel/retry/checkpoint/recovery, a bounded and optionally authenticated HTTP API, a JSON-capable CLI, a TypeScript SDK, a dashboard shell, and unit/integration tests.
 
 The default runtime uses a local JSONL event log so it can run without Docker or an external database. The persistence interfaces are intentionally provider-neutral; PostgreSQL, Redis, vector databases, graph databases, MCP transports, and federated nodes are declared as extension points and are not represented as complete implementations in this release.
 
@@ -26,7 +26,7 @@ pnpm dev:cli run "Review this repository architecture"
 pnpm dev:cli run "Review this repository architecture" --json
 ```
 
-The API listens on `http://localhost:8787` by default. Set `HELIX_DATA_DIR` to choose the durable data directory and `HELIX_PORT` to change the port.
+The API listens on `http://127.0.0.1:8787` by default. Set `HELIX_DATA_DIR` to choose the durable data directory and `HELIX_PORT` or `HELIX_HOST` to change the listener. For non-local access, set `HELIX_API_KEY`; all routes except `/api/v1/health` then require `Authorization: Bearer <key>`. Request bodies are bounded and a per-client request rate limit is enforced.
 
 ## Repository map
 
@@ -59,6 +59,18 @@ pnpm typecheck
 pnpm build
 pnpm test
 ```
+
+Lifecycle controls are available through the CLI and API:
+
+```bash
+helix execution <execution-id> pause
+helix execution <execution-id> resume
+helix execution <execution-id> cancel
+helix execution <execution-id> retry
+helix execution <execution-id> checkpoint
+```
+
+The runtime persists lifecycle events and can rehydrate completed executions from the event log. `helix recover` is planned as a daemon command; the runtime recovery API is currently exposed through the SDK and application layer.
 
 Measured benchmark output is written by `helix benchmark` and is never hard-coded into documentation.
 

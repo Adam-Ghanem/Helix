@@ -83,3 +83,49 @@ test('runtime executes a durable task graph and records events', async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+
+test('runtime retry resumes failed work and repeated views do not duplicate tasks', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-retry-'));
+  let calls = 0;
+  try {
+    const runtime = new HelixRuntime({
+      dataDirectory: directory,
+      provider: {
+        name: 'flaky-test-provider',
+        async execute(input) {
+          calls += 1;
+          if (calls === 1) throw new Error(`transient failure in ${input.task.title}`);
+          return { output: { ok: true }, tokens: 1, costUsd: 0.001, quality: 0.9 };
+        },
+      },
+    });
+    const failed = await runtime.execute({ goal: 'Exercise retry recovery' });
+    assert.equal(failed.status, 'failed');
+    const before = await runtime.view(failed.id);
+    const repeated = await runtime.view(failed.id);
+    assert.equal(before.tasks.length, repeated.tasks.length);
+    const checkpoint = await runtime.checkpoint(failed.id);
+    assert.ok(checkpoint.sequence > 0);
+    const recovered = await runtime.retry(failed.id);
+    assert.equal(recovered.status, 'completed');
+    assert.ok((await runtime.view(failed.id)).events.some((event) => event.type === 'execution.retry_requested'));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('runtime rehydrates completed executions from the event log', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-rehydrate-'));
+  try {
+    const first = new HelixRuntime({ dataDirectory: directory });
+    const execution = await first.execute({ goal: 'Persist this execution' });
+    const second = new HelixRuntime({ dataDirectory: directory });
+    const view = await second.view(execution.id);
+    assert.equal(view.execution.status, 'completed');
+    assert.equal(view.tasks.length, 4);
+    assert.equal(view.events.filter((event) => event.type === 'task.created').length, 4);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

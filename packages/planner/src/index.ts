@@ -63,6 +63,27 @@ export class TaskGraph {
     Object.assign(task, patch);
   }
 
+  retryFailed(): TaskId[] {
+    const retried: TaskId[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.status !== 'failed') continue;
+      delete task.error;
+      task.status = this.dependenciesCompleted(task) ? 'ready' : 'pending';
+      retried.push(task.id);
+    }
+    return retried;
+  }
+
+  resetRunningForRecovery(): TaskId[] {
+    const reset: TaskId[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.status !== 'running') continue;
+      task.status = this.dependenciesCompleted(task) ? 'ready' : 'pending';
+      reset.push(task.id);
+    }
+    return reset;
+  }
+
   get(taskId: TaskId): TaskRecord {
     return structuredClone(this.require(taskId));
   }

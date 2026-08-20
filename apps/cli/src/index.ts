@@ -15,7 +15,7 @@ function print(value: unknown): void {
 }
 
 function help(): void {
-  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix approvals [--json]\n  helix verify [--json]\n  helix benchmark [--agents N] [--json]`);
+  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
 }
 
 async function main(): Promise<void> {
@@ -39,8 +39,27 @@ async function main(): Promise<void> {
   }
   if (command === 'agents') return print({ agents: runtime.agents.list() });
   if (command === 'events') return print({ events: await runtime.events.read() });
-  if (command === 'approvals') return print({ approvals: runtime.policy.listApprovals() });
+  if (command === 'execution') {
+    const executionId = args[1];
+    const action = args[2];
+    if (!executionId || !['pause', 'resume', 'cancel', 'retry', 'checkpoint'].includes(action ?? '')) throw new Error('Usage: helix execution <id> <pause|resume|cancel|retry|checkpoint>');
+    if (action === 'pause') return print(await runtime.pause(executionId));
+    if (action === 'resume') return print(await runtime.resume(executionId));
+    if (action === 'cancel') return print(await runtime.cancel(executionId));
+    if (action === 'retry') return print(await runtime.retry(executionId));
+    return print(await runtime.checkpoint(executionId));
+  }
+  if (command === 'approvals') {
+    const action = args[1] ?? 'list';
+    const approvalId = args[2];
+    if (action === 'list') return print({ approvals: runtime.policy.listApprovals() });
+    if (!approvalId || !['approve', 'deny'].includes(action)) throw new Error('Usage: helix approvals <list|approve|deny> [id]');
+    const approval = action === 'approve' ? runtime.policy.approve(approvalId, 'cli-user') : runtime.policy.deny(approvalId, 'cli-user');
+    await runtime.events.append({ type: `approval.${approval.status}`, executionId: approval.executionId, agentId: approval.requestedBy, payload: approval });
+    return print(approval);
+  }
   if (command === 'verify') return print({ ok: true, sequence: runtime.events.lastSequence, provider: runtime.provider.name, dataDirectory });
+  if (command === 'recover') return print({ recovered: await runtime.recover(), sequence: runtime.events.lastSequence });
   if (command === 'benchmark') {
     const count = Number(args[args.indexOf('--agents') + 1] ?? 10);
     if (!Number.isInteger(count) || count < 1 || count > 100) throw new Error('--agents must be an integer from 1 to 100');

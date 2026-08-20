@@ -6,13 +6,13 @@ This record reports commands actually run in the local workspace. It does not cl
 |---|---|---|
 | Typecheck | Pass | `pnpm exec tsc -p tsconfig.json --noEmit` |
 | Build | Pass | `pnpm exec tsc -p tsconfig.json` |
-| Unit/integration tests | Pass, 5 tests | Durable events, DAG validation, policy, routing, and runtime execution |
-| CLI smoke test | Pass | Compiled `helix run ... --json` completed a 4-task execution |
-| API smoke test | Pass | Health, POST execution, and execution listing returned valid JSON |
+| Unit/integration tests | Pass, 7 tests | Durable events, DAG validation, policy, routing, runtime execution, retry recovery, and event-log rehydration |
+| CLI smoke test | Pass | Compiled `helix run ... --json`, `helix execution <id> checkpoint`, and `helix recover --json` completed successfully |
+| API smoke test | Pass | Public health, unauthorized rejection, authenticated execution creation, and checkpointing returned expected responses |
 | Dependency audit | Pass | `pnpm audit --audit-level high` reported no known vulnerabilities |
 | Secret scan | Pass | Source-level scan found no private-key or common API-key patterns |
 
-The local deterministic provider reports zero tokens and zero cost because it performs no external model call. Those values are runtime measurements for this provider, not a general performance claim.
+The local deterministic provider reports zero tokens and zero cost because it performs no external model call. Those values are runtime measurements for this provider, not a general performance claim. The API binds to loopback by default; when `HELIX_API_KEY` is configured, all non-health routes require bearer authentication, and request bodies plus per-client request rates are bounded.
 
 ## Release gates still required
 

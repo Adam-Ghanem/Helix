@@ -60,6 +60,7 @@ export class HelixRuntime {
   readonly provider: ModelProvider;
   private readonly executions = new Map<string, ExecutionRecord>();
   private readonly graphs = new Map<string, TaskGraph>();
+  private initialized = false;
 
   constructor(options: RuntimeOptions) {
     this.events = new EventStore({ directory: options.dataDirectory });
@@ -71,8 +72,10 @@ export class HelixRuntime {
   }
 
   async init(): Promise<void> {
+    if (this.initialized) return;
     await this.events.init();
     for (const event of await this.events.read()) this.rebuild(event);
+    this.initialized = true;
   }
 
   async execute(input: ExecutionInput): Promise<ExecutionRecord> {
@@ -115,11 +118,74 @@ export class HelixRuntime {
     return { allowed: decision.action === 'allow', reason: decision.reason, ...(decision.approvalId ? { approvalId: decision.approvalId } : {}) };
   }
 
+  async pause(executionId: string): Promise<ExecutionRecord> {
+    await this.init();
+    const execution = this.requireExecution(executionId);
+    if (execution.status === 'running') {
+      execution.status = 'paused';
+      execution.updatedAt = timestamp();
+      await this.events.append({ type: 'execution.paused', executionId, payload: { execution } });
+    }
+    return structuredClone(execution);
+  }
+
+  async resume(executionId: string): Promise<ExecutionRecord> {
+    await this.init();
+    const execution = this.requireExecution(executionId);
+    if (execution.status === 'paused') {
+      execution.status = 'running';
+      execution.updatedAt = timestamp();
+      await this.events.append({ type: 'execution.resumed', executionId, payload: { execution } });
+      await this.runExecution(executionId);
+    }
+    return structuredClone(execution);
+  }
+
+  async cancel(executionId: string): Promise<ExecutionRecord> {
+    await this.init();
+    const execution = this.requireExecution(executionId);
+    if (['running', 'paused'].includes(execution.status)) {
+      execution.status = 'cancelled';
+      execution.updatedAt = timestamp();
+      await this.events.append({ type: 'execution.cancelled', executionId, payload: { execution } });
+    }
+    return structuredClone(execution);
+  }
+
+  async retry(executionId: string): Promise<ExecutionRecord> {
+    await this.init();
+    const execution = this.requireExecution(executionId);
+    const graph = this.requireGraph(executionId);
+    if (execution.status !== 'failed') throw new Error(`Execution ${executionId} is not failed`);
+    const retried = graph.retryFailed();
+    execution.status = 'running';
+    delete execution.error;
+    execution.updatedAt = timestamp();
+    await this.events.append({ type: 'execution.retry_requested', executionId, payload: { taskIds: retried } });
+    await this.runExecution(executionId);
+    return structuredClone(execution);
+  }
+
+  async checkpoint(executionId: string): Promise<{ sequence: number; createdAt: string }> {
+    await this.init();
+    const execution = this.requireExecution(executionId);
+    const graph = this.requireGraph(executionId);
+    const snapshot = await this.events.snapshot({ executions: [execution], tasks: graph.all() });
+    await this.events.append({ type: 'execution.checkpointed', executionId, payload: { sequence: snapshot.sequence } });
+    return { sequence: snapshot.sequence, createdAt: snapshot.createdAt };
+  }
+
   async recover(): Promise<number> {
     await this.init();
-    const recovered = this.scheduler.recoverExpired();
-    for (const lease of recovered) await this.events.append({ type: 'task.lease_recovered', taskId: lease.taskId, payload: lease });
-    return recovered.length;
+    const recoveredLeases = this.scheduler.recoverExpired();
+    for (const lease of recoveredLeases) await this.events.append({ type: 'task.lease_recovered', taskId: lease.taskId, payload: lease });
+    const resumable = [...this.executions.values()].filter((execution) => execution.status === 'running');
+    for (const execution of resumable) {
+      this.requireGraph(execution.id).resetRunningForRecovery();
+      await this.events.append({ type: 'execution.recovered', executionId: execution.id, payload: { execution } });
+    }
+    await Promise.all(resumable.map((execution) => this.runExecution(execution.id)));
+    return recoveredLeases.length + resumable.length;
   }
 
   private async runExecution(executionId: string): Promise<void> {
@@ -127,7 +193,7 @@ export class HelixRuntime {
     const graph = this.graphs.get(executionId)!;
     const started = Date.now();
     try {
-      while (graph.all().some((task) => ['pending', 'ready', 'running'].includes(task.status))) {
+      while (execution.status === 'running' && graph.all().some((task) => ['pending', 'ready', 'running'].includes(task.status))) {
         const ready = graph.ready();
         if (!ready.length) {
           if (graph.all().some((task) => task.status === 'running')) break;
@@ -136,6 +202,7 @@ export class HelixRuntime {
         await Promise.all(ready.map((task) => this.runTask(execution, graph, task)));
         if (Date.now() - started > execution.budget.maxRuntimeMs) throw new Error('Execution exceeded runtime budget');
       }
+      if (execution.status !== 'running') return;
       const failed = graph.all().filter((task) => task.status === 'failed');
       execution.status = failed.length ? 'failed' : 'completed';
       execution.updatedAt = timestamp();
@@ -189,7 +256,49 @@ export class HelixRuntime {
     if (event.type === 'execution.started') {
       const payload = event.payload as { execution: ExecutionRecord };
       if (payload.execution) this.executions.set(payload.execution.id, structuredClone(payload.execution));
+      return;
     }
+    if (!event.executionId) return;
+    const execution = this.executions.get(event.executionId);
+    if (event.type === 'task.created') {
+      const task = event.payload as TaskRecord;
+      const existing = this.graphs.get(event.executionId)?.all() ?? [];
+      this.graphs.set(event.executionId, new TaskGraph([...existing, task]));
+      return;
+    }
+    if (!execution) return;
+    const graph = this.graphs.get(event.executionId);
+    if (event.type === 'execution.paused' || event.type === 'execution.resumed' || event.type === 'execution.cancelled' || event.type === 'execution.completed' || event.type === 'execution.failed') {
+      const payload = event.payload as { execution?: ExecutionRecord };
+      if (payload.execution) this.executions.set(event.executionId, structuredClone(payload.execution));
+      return;
+    }
+    if (!graph || !event.taskId) return;
+    if (event.type === 'task.started') {
+      const payload = event.payload as { task?: TaskRecord };
+      graph.update(event.taskId, { ...(event.agentId ? { assignedAgentId: event.agentId } : {}), attempts: (payload.task?.attempts ?? graph.get(event.taskId).attempts) });
+      graph.setStatus(event.taskId, 'running');
+    } else if (event.type === 'task.completed') {
+      const payload = event.payload as { result?: unknown };
+      graph.update(event.taskId, { result: payload.result });
+      graph.setStatus(event.taskId, 'completed');
+    } else if (event.type === 'task.failed') {
+      const payload = event.payload as { error?: string };
+      if (payload.error) graph.update(event.taskId, { error: payload.error });
+      graph.setStatus(event.taskId, 'failed');
+    }
+  }
+
+  private requireExecution(executionId: string): ExecutionRecord {
+    const execution = this.executions.get(executionId);
+    if (!execution) throw new Error(`Unknown execution: ${executionId}`);
+    return execution;
+  }
+
+  private requireGraph(executionId: string): TaskGraph {
+    const graph = this.graphs.get(executionId);
+    if (!graph) throw new Error(`Unknown execution graph: ${executionId}`);
+    return graph;
   }
 }
 

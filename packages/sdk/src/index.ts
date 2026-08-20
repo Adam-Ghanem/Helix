@@ -34,12 +34,48 @@ export class HelixClient {
     return this.request(`/executions/${encodeURIComponent(id)}`);
   }
 
+  async pause(id: string): Promise<Record<string, unknown>> {
+    return this.lifecycle(id, 'pause');
+  }
+
+  async resume(id: string): Promise<Record<string, unknown>> {
+    return this.lifecycle(id, 'resume');
+  }
+
+  async cancel(id: string): Promise<Record<string, unknown>> {
+    return this.lifecycle(id, 'cancel');
+  }
+
+  async retry(id: string): Promise<Record<string, unknown>> {
+    return this.lifecycle(id, 'retry');
+  }
+
+  async checkpoint(id: string): Promise<Record<string, unknown>> {
+    return this.lifecycle(id, 'checkpoint');
+  }
+
   async events(): Promise<Record<string, unknown>> {
     return this.request('/events');
   }
 
+  async recover(): Promise<Record<string, unknown>> {
+    return this.request('/recover', { method: 'POST' });
+  }
+
   async approvals(): Promise<Record<string, unknown>> {
     return this.request('/approvals');
+  }
+
+  async approve(id: string): Promise<Record<string, unknown>> {
+    return this.request(`/approvals/${encodeURIComponent(id)}/approve`, { method: 'POST' });
+  }
+
+  async deny(id: string): Promise<Record<string, unknown>> {
+    return this.request(`/approvals/${encodeURIComponent(id)}/deny`, { method: 'POST' });
+  }
+
+  private async lifecycle(id: string, action: 'pause' | 'resume' | 'cancel' | 'retry' | 'checkpoint'): Promise<Record<string, unknown>> {
+    return this.request(`/executions/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
   }
 
   private async request(path: string, init: RequestInit = {}): Promise<Record<string, unknown>> {
