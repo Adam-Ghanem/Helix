@@ -38,13 +38,21 @@ The API listens on `http://127.0.0.1:8787` by default. Set `HELIX_DATA_DIR` to c
 | `packages/router` | Capability, weighted, quality, cost, latency, hybrid routing | Implemented |
 | `packages/policy` | Default-deny policy decisions and approvals | Implemented |
 | `packages/scheduler` | Durable local leases and recovery hooks | Implemented |
-| `packages/runtime` | Observe–interpret–plan–act–evaluate lifecycle | Implemented |
+| `packages/runtime` | Observe–interpret–plan–act–evaluate lifecycle, lifecycle controls, memory, telemetry | Implemented |
 | `packages/agents` | Built-in catalog, health, reputation | Implemented |
-| `packages/sdk` | TypeScript client | Implemented |
+| `packages/memory` | Access-controlled structured memory and deterministic search | Implemented |
+| `packages/tools` / `packages/mcp` | Tool schema registry and MCP security boundary | Implemented boundary |
+| `packages/workflows` | Versioned declarative workflow DAGs | Implemented |
+| `packages/swarm` / `packages/consensus` | Swarm topology planning and consensus strategies | Implemented |
+| `packages/knowledge` | Provenance-aware graph entities and relations | Implemented |
+| `packages/observability` | Correlated spans, metrics, and structured logs | Implemented |
+| `packages/evaluation` | Rule, schema, test, human, and non-authoritative LLM-judge evaluation contracts | Implemented |
+| `packages/learning` | Trajectory evidence and reusable strategy/tool patterns | Implemented |
+| `packages/sdk` | TypeScript client for execution, lifecycle, memory, telemetry, approvals | Implemented |
 | `apps/api` | Versioned HTTP API | Implemented |
 | `apps/cli` | Professional CLI with JSON output | Implemented |
 | `apps/dashboard` | Read-only dashboard shell | Boundary documented |
-| `packages/mcp`, `federation`, `sandbox` | Secure integration boundaries | Interfaces and policy hooks only |
+| `packages/federation`, `packages/sandbox` | Remote nodes and isolated execution | Interfaces and policy hooks only |
 
 ## Security posture
 
@@ -72,7 +80,7 @@ helix execution <execution-id> checkpoint
 
 The runtime persists lifecycle events and can rehydrate completed executions from the event log. `helix recover` is planned as a daemon command; the runtime recovery API is currently exposed through the SDK and application layer.
 
-Measured benchmark output is written by `helix benchmark` and is never hard-coded into documentation.
+Measured benchmark output is written by `node benchmarks/runtime.mjs` or `pnpm benchmark` and is never hard-coded into documentation. The golden flow is available through `pnpm golden-demo`.
 
 ## License
 

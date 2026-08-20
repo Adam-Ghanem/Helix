@@ -62,6 +62,19 @@ export class HelixClient {
     return this.request('/recover', { method: 'POST' });
   }
 
+  async remember(input: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.request('/memory', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  async recall(query: { q: string; namespace?: string; subject?: string; limit?: number }): Promise<Record<string, unknown>> {
+    const params = new URLSearchParams({ q: query.q, namespace: query.namespace ?? 'default', subject: query.subject ?? 'api-user', limit: String(query.limit ?? 20) });
+    return this.request(`/memory/search?${params.toString()}`);
+  }
+
+  async telemetry(): Promise<Record<string, unknown>> {
+    return this.request('/telemetry');
+  }
+
   async approvals(): Promise<Record<string, unknown>> {
     return this.request('/approvals');
   }

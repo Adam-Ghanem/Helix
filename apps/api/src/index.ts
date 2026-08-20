@@ -70,6 +70,28 @@ const server = createServer(async (request, response) => {
     if (!withinRateLimit(request)) return json(response, 429, { error: 'rate_limit_exceeded' });
     if (url.pathname === '/api/v1/health' && request.method === 'GET') return json(response, 200, { status: 'ok', service: 'helix-api', provider: runtime.provider.name, sequence: runtime.events.lastSequence, auth: Boolean(apiKey) });
     if (url.pathname === '/api/v1/agents' && request.method === 'GET') return json(response, 200, { agents: runtime.agents.list() });
+    if (url.pathname === '/api/v1/memory/search' && request.method === 'GET') {
+      const query = url.searchParams.get('q') ?? '';
+      const namespace = url.searchParams.get('namespace') ?? 'default';
+      const subject = url.searchParams.get('subject') ?? 'api-user';
+      return json(response, 200, { hits: await runtime.recall({ query, namespace, subject, limit: Number(url.searchParams.get('limit') ?? 20) }) });
+    }
+    if (url.pathname === '/api/v1/memory' && request.method === 'POST') {
+      const input = await body(request);
+      if (typeof input.content !== 'string' || !input.content.trim()) return json(response, 400, { error: 'content is required' });
+      const record = await runtime.remember({
+        namespace: typeof input.namespace === 'string' ? input.namespace : 'default',
+        owner: typeof input.owner === 'string' ? input.owner : 'api-user',
+        content: input.content,
+        importance: typeof input.importance === 'number' ? Math.max(0, Math.min(1, input.importance)) : 0.5,
+        confidence: typeof input.confidence === 'number' ? Math.max(0, Math.min(1, input.confidence)) : 0.5,
+        source: typeof input.source === 'object' && input.source ? input.source as never : {},
+        ...(typeof input.expiresAt === 'string' ? { expiresAt: input.expiresAt } : {}),
+        allowedSubjects: Array.isArray(input.allowedSubjects) ? input.allowedSubjects.filter((value): value is string => typeof value === 'string') : ['api-user'],
+      });
+      return json(response, 201, record);
+    }
+    if (url.pathname === '/api/v1/telemetry' && request.method === 'GET') return json(response, 200, runtime.telemetrySnapshot());
     if (url.pathname === '/api/v1/approvals' && request.method === 'GET') return json(response, 200, { approvals: runtime.policy.listApprovals(statusFilter(url.searchParams.get('status'))) });
     if (url.pathname === '/api/v1/executions' && request.method === 'POST') {
       const input = await body(request);

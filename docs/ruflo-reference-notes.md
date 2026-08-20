@@ -30,3 +30,13 @@ The README’s marketing and implementation claims are not treated as verified b
 The public package manifest additionally shows a large TypeScript/Node ecosystem with a root CLI, selected workspace packages, optional native persistence/vector components, security and federation packages, and explicit build/test/security scripts. Helix will borrow only the general engineering lesson—keep integrations modular and optional—while using a smaller dependency-free core and explicit adapters to avoid pretending that optional provider/database integrations are already complete.
 
 2. [Ruflo public package manifest](https://github.com/ruvnet/ruflo/blob/main/package.json)
+
+
+## Additional public reference review
+
+The public Ruflo documentation index shows dedicated areas for federation, benchmarks, security, validation, research, reviews, plugins, and iterative improvement cycles. This suggests a mature developer experience treats validation, benchmarks, security, and improvement evidence as first-class repository surfaces rather than afterthoughts.
+
+The public security policy emphasizes supported-version discipline, private vulnerability reporting, reproducible reports, response timelines, and explicit boundary controls such as input validation, parameterized queries, path-traversal prevention, and command-injection protection. Helix will independently add these as engineering requirements where applicable, without copying Ruflo modules or text.
+
+3. [Ruflo public documentation index](https://github.com/ruvnet/ruflo/tree/main/docs)
+4. [Ruflo public security policy](https://github.com/ruvnet/ruflo/blob/main/SECURITY.md)

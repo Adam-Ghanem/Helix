@@ -5,6 +5,8 @@ import { defaultPlan, TaskGraph } from '../../planner/src/index.js';
 import { AgentRouter, RoutingCandidate } from '../../router/src/index.js';
 import { PolicyEngine, secureDefaultRules } from '../../policy/src/index.js';
 import { LeaseScheduler } from '../../scheduler/src/index.js';
+import { MemoryQuery, MemoryRecord, MemoryStore } from '../../memory/src/index.js';
+import { Telemetry } from '../../observability/src/index.js';
 
 export interface ProviderResult {
   output: unknown;
@@ -43,6 +45,8 @@ export interface RuntimeOptions {
   router?: AgentRouter;
   policy?: PolicyEngine;
   scheduler?: LeaseScheduler;
+  memory?: MemoryStore;
+  telemetry?: Telemetry;
 }
 
 export interface ExecutionView {
@@ -58,6 +62,8 @@ export class HelixRuntime {
   readonly policy: PolicyEngine;
   readonly scheduler: LeaseScheduler;
   readonly provider: ModelProvider;
+  readonly memory: MemoryStore;
+  readonly telemetry: Telemetry;
   private readonly executions = new Map<string, ExecutionRecord>();
   private readonly graphs = new Map<string, TaskGraph>();
   private initialized = false;
@@ -69,17 +75,21 @@ export class HelixRuntime {
     this.policy = options.policy ?? new PolicyEngine(secureDefaultRules);
     this.scheduler = options.scheduler ?? new LeaseScheduler();
     this.provider = options.provider ?? new DeterministicProvider();
+    this.memory = options.memory ?? new MemoryStore(options.dataDirectory);
+    this.telemetry = options.telemetry ?? new Telemetry();
   }
 
   async init(): Promise<void> {
     if (this.initialized) return;
     await this.events.init();
+    await this.memory.init();
     for (const event of await this.events.read()) this.rebuild(event);
     this.initialized = true;
   }
 
   async execute(input: ExecutionInput): Promise<ExecutionRecord> {
     await this.init();
+    const executionSpan = this.telemetry.startSpan('helix.execution', { 'execution.goal_length': input.goal.length, provider: this.provider.name });
     const execution: ExecutionRecord = {
       id: id('ex'),
       goal: input.goal,
@@ -101,7 +111,24 @@ export class HelixRuntime {
     for (const task of tasks) await this.events.append({ type: 'task.created', executionId: execution.id, taskId: task.id, payload: task, idempotencyKey: `task:${task.id}:created` });
     await this.events.append({ type: 'plan.created', executionId: execution.id, payload: { taskIds: execution.taskIds, criticalPathMs: graph.criticalPathMs() } });
     await this.runExecution(execution.id);
-    return structuredClone(this.executions.get(execution.id)!);
+    const completed = this.executions.get(execution.id)!;
+    this.telemetry.endSpan(executionSpan, completed.status === 'failed' ? 'error' : 'ok', completed.error);
+    this.telemetry.recordMetric('helix.execution.completed', 1, { status: completed.status, provider: this.provider.name });
+    return structuredClone(completed);
+  }
+
+  async remember(input: Omit<MemoryRecord, 'id' | 'createdAt' | 'updatedAt'>): Promise<MemoryRecord> {
+    await this.init();
+    return this.memory.store(input);
+  }
+
+  async recall(query: MemoryQuery) {
+    await this.init();
+    return this.memory.search(query);
+  }
+
+  telemetrySnapshot() {
+    return this.telemetry.snapshot();
   }
 
   async view(executionId: string): Promise<ExecutionView> {
