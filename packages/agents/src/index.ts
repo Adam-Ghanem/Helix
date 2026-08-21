@@ -55,7 +55,7 @@ export class AgentRegistry {
     if (!Number.isInteger(count) || count < 0) throw new Error('Agent seed count must be a non-negative integer');
     const created: AgentProfile[] = [];
     for (let index = 0; index < count; index += 1) {
-      const template = CATALOG[index % CATALOG.length];
+      const template = CATALOG[index % CATALOG.length]!;
       const ordinal = Math.floor(index / CATALOG.length) + 1;
       created.push(this.register({
         name: `${template.type}-${String(ordinal).padStart(2, '0')}`,
@@ -69,67 +69,36 @@ export class AgentRegistry {
   register(input: { name: string; role: string; capabilities: string[]; permissions?: string[]; model?: string; provider?: string }): AgentProfile {
     if (this.list().some((agent) => agent.name === input.name)) throw new Error(`Agent already registered: ${input.name}`);
     const profile: AgentProfile = {
-      id: id('agent'),
-      name: input.name,
-      role: input.role,
-      capabilities: [...new Set(input.capabilities)],
-      ...(input.model ? { model: input.model } : {}),
-      ...(input.provider ? { provider: input.provider } : {}),
-      permissions: [...(input.permissions ?? [])],
-      status: 'idle',
-      health: initialHealth(),
-      reputation: [],
+      id: id('agent'), name: input.name, role: input.role, capabilities: [...new Set(input.capabilities)],
+      ...(input.model ? { model: input.model } : {}), ...(input.provider ? { provider: input.provider } : {}),
+      permissions: [...(input.permissions ?? [])], status: 'idle', health: initialHealth(), reputation: [],
     };
     this.agents.set(profile.id, profile);
     return structuredClone(profile);
   }
 
-  list(): AgentProfile[] {
-    return [...this.agents.values()].map((agent) => structuredClone(agent));
-  }
-
-  get(agentId: AgentId): AgentProfile {
-    return structuredClone(this.require(agentId));
-  }
-
-  setStatus(agentId: AgentId, status: AgentProfile['status']): void {
-    this.require(agentId).status = status;
-  }
+  list(): AgentProfile[] { return [...this.agents.values()].map((agent) => structuredClone(agent)); }
+  get(agentId: AgentId): AgentProfile { return structuredClone(this.require(agentId)); }
+  setStatus(agentId: AgentId, status: AgentProfile['status']): void { this.require(agentId).status = status; }
 
   recordOutcome(agentId: AgentId, input: { taskType: string; domain: string; success: boolean; quality: number; latencyMs: number; tokens: number; toolFailures?: number; timedOut?: boolean; costUsd?: number }): void {
-    const agent = this.require(agentId);
-    const sample = agent.health.samples + 1;
+    const agent = this.require(agentId); const sample = agent.health.samples + 1;
     agent.health.successRate = ((agent.health.successRate * agent.health.samples) + (input.success ? 1 : 0)) / sample;
     agent.health.failureRate = 1 - agent.health.successRate;
     agent.health.qualityScore = ((agent.health.qualityScore * agent.health.samples) + Math.max(0, Math.min(1, input.quality))) / sample;
     agent.health.latencyMs = ((agent.health.latencyMs * agent.health.samples) + input.latencyMs) / sample;
-    agent.health.tokenConsumption += input.tokens;
-    agent.health.toolFailures += input.toolFailures ?? 0;
-    agent.health.timeouts += input.timedOut ? 1 : 0;
-    agent.health.samples = sample;
+    agent.health.tokenConsumption += input.tokens; agent.health.toolFailures += input.toolFailures ?? 0; agent.health.timeouts += input.timedOut ? 1 : 0; agent.health.samples = sample;
     const existing = agent.reputation.find((record) => record.taskType === input.taskType && record.domain === input.domain);
-    if (existing) {
-      existing.score = 0.9 * existing.score + 0.1 * input.quality;
-      existing.samples += 1;
-      existing.lastUpdated = timestamp();
-    } else {
-      agent.reputation.push({ taskType: input.taskType, domain: input.domain, score: input.quality, samples: 1, lastUpdated: timestamp() });
-    }
+    if (existing) { existing.score = 0.9 * existing.score + 0.1 * input.quality; existing.samples += 1; existing.lastUpdated = timestamp(); }
+    else agent.reputation.push({ taskType: input.taskType, domain: input.domain, score: input.quality, samples: 1, lastUpdated: timestamp() });
   }
 
   reputation(agentId: AgentId, taskType: string, domain: string): number {
-    const agent = this.require(agentId);
-    const record = agent.reputation.find((candidate) => candidate.taskType === taskType && candidate.domain === domain);
+    const agent = this.require(agentId); const record = agent.reputation.find((candidate) => candidate.taskType === taskType && candidate.domain === domain);
     if (!record) return agent.health.qualityScore;
-    const ageDays = Math.max(0, (Date.now() - Date.parse(record.lastUpdated)) / 86_400_000);
-    const decay = Math.exp(-ageDays / 30);
-    const exploration = 1 / Math.sqrt(record.samples + 1);
+    const ageDays = Math.max(0, (Date.now() - Date.parse(record.lastUpdated)) / 86_400_000); const decay = Math.exp(-ageDays / 30); const exploration = 1 / Math.sqrt(record.samples + 1);
     return Math.max(0, Math.min(1, record.score * decay + 0.15 * exploration));
   }
 
-  private require(agentId: AgentId): AgentProfile {
-    const agent = this.agents.get(agentId);
-    if (!agent) throw new Error(`Unknown agent: ${agentId}`);
-    return agent;
-  }
+  private require(agentId: AgentId): AgentProfile { const agent = this.agents.get(agentId); if (!agent) throw new Error(`Unknown agent: ${agentId}`); return agent; }
 }
