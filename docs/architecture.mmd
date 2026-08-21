@@ -1,17 +1,26 @@
-flowchart TB
+flowchart TD
   User[Human / automation] --> API[Versioned HTTP API]
   User --> CLI[helix CLI]
   API --> Runtime[Helix Runtime]
   CLI --> Runtime
-  Runtime --> Router[Adaptive Router]
-  Runtime --> Planner[Validated Task DAG]
+  Runtime --> Recall[Memory Recall]
+  Recall --> Router[Adaptive Router]
+  Runtime --> Router
+  Router --> Planner[Validated Task DAG]
+  Router --> Agents[Agent Registry + Health + Reputation]
   Runtime --> Scheduler[Lease Scheduler + Durable Leases]
-  Runtime --> Agents[Agent Registry + Health]
   Runtime --> Policy[Default-deny Policy + RBAC + Approvals]
   Runtime --> Provider[Provider Interface]
   Runtime --> Events[Durable Event Store]
   Events --> Replay[Replay + Atomic Snapshots]
-  Runtime --> Memory[ACL Memory + Knowledge Graph]
+  Runtime --> Memory[Persistent MemoryStore]
+  Memory --> ACL[Namespace ACL + Provenance]
+  Memory --> Search[Hybrid Search + Deterministic Embedding Abstraction]
+  Runtime --> Learning[Persistent Learning Engine]
+  Learning --> Outcome[Outcome Sanitization + Idempotency]
+  Outcome --> Memory
+  Learning --> Bonus[Bounded Learning Bonus <= 10%]
+  Bonus --> Router
   Runtime --> Telemetry[Traces + Metrics + Logs]
   Runtime --> SandboxManager[SandboxManager]
   SandboxManager --> SandboxPolicy[Canonical Paths + Exec Allowlist + Env Filter]
@@ -21,8 +30,9 @@ flowchart TB
   Docker --> Execution
   Execution --> Audit[SandboxAuditLog]
   Audit --> Events
-  Runtime --> Dashboard[Read-only Dashboard]
+  Runtime --> Knowledge[Local Knowledge Graph]
   Policy -. guarded boundary .-> Tools[Tool / MCP adapters]
   Policy -. plugin permissions .-> Plugins[Trusted Plugin Registry]
   Provider --> Models[Provider / Model Discovery]
   Scheduler -. signed protocol foundation .-> Nodes[Remote Helix nodes]
+  Runtime --> Dashboard[Read-only Dashboard]

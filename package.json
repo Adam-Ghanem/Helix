@@ -19,7 +19,9 @@
     "verify": "pnpm typecheck && pnpm build && pnpm test",
     "benchmark": "pnpm exec tsc -p tsconfig.json && node benchmarks/runtime.mjs",
     "golden-demo": "pnpm exec tsc -p tsconfig.json && node examples/golden-demo.mjs",
-    "sandbox-demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-sandbox-demo.js"
+    "sandbox-demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-sandbox-demo.js",
+    "memory-demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-memory-learning-demo.js",
+    "memory-benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/memory-learning.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

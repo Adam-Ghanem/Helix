@@ -97,6 +97,32 @@ The runtime persists lifecycle events and can rehydrate completed executions fro
 
 Measured benchmark output is written by `node benchmarks/runtime.mjs` or `pnpm benchmark` and is never hard-coded into documentation. The golden flow is available through `pnpm golden-demo`, and the sandbox flow is available through `pnpm sandbox-demo`. See [`docs/milestone-8-sandbox.md`](docs/milestone-8-sandbox.md) for backend guarantees and deployment limitations.
 
+## M9 intelligence and persistent memory
+
+M9 adds a local-first learning loop around the existing runtime. Helix now supports typed `MemoryEntry` records, global/agent/swarm/task/session namespaces, ACL enforcement, provenance, confidence, deterministic hybrid search, configurable decay, sanitized outcome persistence, idempotent learning events, agent experience, and bounded routing hints. The learning bonus is capped at 10% and cannot override required capability matching.
+
+Memory and learning commands are available through the CLI:
+
+```bash
+helix memory search "authentication TypeScript"
+helix memory list
+helix memory inspect <memory-id>
+helix memory stats
+helix learning agent <agent-id>
+helix learning hints "authentication debugging"
+```
+
+The API exposes `GET/POST /api/v1/memory`, `GET/DELETE /api/v1/memory/:id`, `GET /api/v1/memory/search`, `GET /api/v1/learning/hints`, `GET /api/v1/learning/agent/:agentId`, and `POST /api/v1/learning/outcome`. Governed MCP registration exposes `helix.memory.search`, `helix.memory.get`, `helix.memory.list`, `helix.memory.stats`, `helix.learning.recall`, `helix.learning.routingHints`, and `helix.learning.agentExperience`.
+
+Run the deterministic 100-agent/1,000-task simulation and measured comparison with:
+
+```bash
+pnpm memory-demo
+pnpm memory-benchmark
+```
+
+The deterministic embedding provider is a local testing abstraction, not a production neural semantic model. The default JSONL backend is local-first and can later be replaced behind the storage and embedding interfaces. See [`ARCHITECTURE.md`](ARCHITECTURE.md), [`docs/milestone-9-memory-learning.md`](docs/milestone-9-memory-learning.md), and [`docs/architecture.mmd`](docs/architecture.mmd).
+
 ## License
 
 Apache-2.0. Independent implementation. Helix does not copy source code, branding, or proprietary architecture from other projects.
