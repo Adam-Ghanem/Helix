@@ -139,9 +139,9 @@ The benchmark uses 100 agents, 1,000 tasks, and 10,000 seeded memories. It repor
 
 ## M11 full MCP ecosystem
 
-M11 adds an official `@modelcontextprotocol/sdk` adapter over existing Helix capabilities. The server registers **190 unique typed tools** across agents, tasks, scheduler, workers, swarm, memory, learning, sandbox, security, policy, providers, models, workflows, evaluation, federation, system, GitHub boundary, filesystem, browser boundary, events, and intelligence families. Each tool has a unique name, Zod input schema, family, risk classification, permissions, deterministic error category, authorization check, rate-limit bucket, and sanitized audit record.
+M11 adds an official `@modelcontextprotocol/sdk` adapter over existing Helix capabilities. The server registers **204 unique typed tools** across agents, tasks, scheduler, workers, swarm, memory, learning, sandbox, security, policy, providers, models, workflows, evaluation, federation, system, GitHub boundary, filesystem, browser boundary, events, and intelligence families. Each tool has a unique name, Zod input schema, family, risk classification, permissions, deterministic error category, authorization check, rate-limit bucket, and sanitized audit record.
 
-The server also exposes eleven protected resources and ten policy-aware prompts. Supported transports are official SDK stdio and Streamable HTTP:
+The server also exposes thirteen protected resources and ten policy-aware prompts. Supported transports are official SDK stdio and Streamable HTTP:
 
 ```bash
 helix mcp doctor --json
@@ -180,6 +180,35 @@ pnpm intelligence:benchmark
 ```
 
 The benchmark uses 100 registered agents and 1,000 measured capability-safe task-unit selections, plus a full orchestration run. It reports measured p50/p95/p99 and average selection latency, throughput, plan validation, completion, replanning, CPU, and heap data. Results are local measurements rather than production capacity guarantees. See [`docs/milestone-12-intelligence.md`](docs/milestone-12-intelligence.md) for architecture, state transitions, security, learning, verification, and limitations.
+
+## M13 autonomous swarm
+
+M13 extends the M12 intelligence layer with a dynamic autonomous swarm control plane. Swarms maintain bounded membership, multiple compatible roles, explicit lifecycle states, coordinator promotion and demotion, capability-safe delegation, task handoffs with loop detection, a collaboration graph, adaptive topology, bounded scale-up and scale-down, health monitoring, deterministic rebalancing, failure recovery evidence, application-level review consensus, result aggregation, and SQLite-backed swarm learning.
+
+The swarm layer does not create a second scheduler or worker pool. Actual delegated work reserves leases through the existing `AgentScheduler`; the existing AgentRegistry, AgentRouter, policy engine, sandbox manager, MCP authorization/audit/rate limiting, and M10 memory ACL/provenance/sanitization rules remain authoritative. Capability mismatch is a hard constraint. High- and critical-risk swarm mutations require explicit `approvedBy` authorization, and all handoffs, fan-out, scaling, and recovery loops are bounded.
+
+Use the new CLI surfaces as follows:
+
+```bash
+helix swarm create --goal "Build and review a release pipeline" --topology adaptive --max-agents 12
+helix swarm status <swarm-id>
+helix swarm members <swarm-id>
+helix swarm scale <swarm-id> 6
+helix swarm rebalance <swarm-id>
+helix swarm graph <swarm-id>
+helix swarm explain <swarm-id>
+```
+
+The versioned API exposes `/api/v1/swarms` creation and listing together with status, membership, health, graph, critical-path, scale, delegate, handoff, topology, rebalance, explain, and cancellation routes. The MCP adapter adds fourteen dynamic swarm controls to the existing swarm family and two additional lifecycle/topology controls; all remain under the established typed schema, authorization, rate-limit, audit, and redaction boundary. Protected `helix://swarms` and `helix://swarm-collaboration` resources expose governed runtime state.
+
+Run the deterministic demonstration and measured benchmark with:
+
+```bash
+pnpm swarm:demo
+pnpm swarm:benchmark
+```
+
+The M13 benchmark uses 100 registered agents and 1,000 bounded task units and reports measured scaling, formation, delegation, completion, failure/health, rebalancing, consensus, aggregation, memory lookup, throughput, and end-to-end timings. It is a local observation, not a production capacity guarantee. M13 consensus is application-level and not Byzantine fault tolerant; the process-local swarm graph and learning queue require distributed persistence and delivery work for multi-host deployments. See [`docs/milestone-13-autonomous-swarm.md`](docs/milestone-13-autonomous-swarm.md) for the design, operational boundaries, verification, and limitations.
 
 ## License
 
