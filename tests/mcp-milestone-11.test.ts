@@ -20,7 +20,7 @@ async function expectMcpError(run: () => Promise<unknown>, category: string): Pr
 }
 
 test('M11 registers 150+ unique typed tools with coherent family distribution', async () => withRuntime('helix-m11-registry-', async (_runtime, server) => {
-  assert.equal(server.registry.count(), 215);
+  assert.equal(server.registry.count(), 225);
   const names = server.registry.list().map((tool) => tool.name);
   assert.equal(new Set(names).size, names.length);
   for (const definition of server.registry.list()) assert.doesNotThrow(() => z.object(definition.inputSchema));
@@ -106,7 +106,7 @@ test('M11 legacy ToolRegistry can receive the same typed definitions without dup
   const registry = new ToolRegistryForTest();
   const definitions = buildMcpToolDefinitions(server.bridge);
   registry.registerMany(definitions);
-  assert.equal(registry.count(), 215);
+  assert.equal(registry.count(), 225);
 }));
 
 class ToolRegistryForTest {
@@ -120,13 +120,13 @@ void McpAuditLog;
 void McpAuthorization;
 void McpToolRegistry;
 
-test('M14 federation MCP tools and resources are registered under the governed boundary', async () => withRuntime('helix-m14-mcp-surfaces-', async (_runtime, server) => {
-  assert.equal(server.registry.listByFamily('federation').length, 19);
+test('M15 federation MCP tools and resources are registered under the governed boundary', async () => withRuntime('helix-m14-mcp-surfaces-', async (_runtime, server) => {
+  assert.equal(server.registry.listByFamily('federation').length, 29);
   assert.equal(server.registry.has('helix_federation_task_dispatch'), true);
   assert.equal(server.resources.includes('helix://federation-status'), true);
   assert.equal(server.prompts.includes('helix_federation_recovery'), true);
 }));
 
-test('M14 remote federation dispatch remains denied to the default viewer actor', async () => withRuntime('helix-m14-mcp-auth-', async (_runtime, server) => {
+test('M15 remote federation dispatch remains denied to the default viewer actor', async () => withRuntime('helix-m14-mcp-auth-', async (_runtime, server) => {
   await expectMcpError(() => server.execute('helix_federation_task_dispatch', { taskId: 'mcp-remote', requiredCapabilities: ['analysis'], locality: 'remote' }), 'FORBIDDEN');
 }));
