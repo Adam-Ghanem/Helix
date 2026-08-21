@@ -1,6 +1,7 @@
 import { id, timestamp, type AgentId, type ExecutionId, type TaskRecord } from '../../core/src/index.js';
 import { SwarmCoordinator, type SwarmTopology } from '../../swarm/src/index.js';
 import type { HelixRuntime } from '../../runtime/src/index.js';
+import type { DynamicSwarmTask, DynamicSwarmTopology, Swarm, SwarmConsensusResult, SwarmFormationResult, SwarmHealthSnapshot, SwarmResult, ScaleDecision, RebalanceResult, DelegationRecord, HandoffRecord, CollaborationGraph, SwarmRole } from '../../swarm/src/index.js';
 import { IntelligenceAgentSelector } from './agent-selector.js';
 import { analyzeGoal, createGoal } from './goal.js';
 import { OrchestrationEvaluator } from './evaluator.js';
@@ -137,6 +138,27 @@ export class HelixOrchestrator {
   }
 
   async run(input: Parameters<typeof createGoal>[0], approval?: { approvedBy: string }): Promise<OrchestrationRecord> { const goal = await this.createGoal(input); await this.analyzeGoal(goal); const plan = await this.createPlan(goal); return this.executePlan(plan.id, approval); }
+
+  async createSwarm(input: { name: string; goalId: string; topology?: DynamicSwarmTopology; strategy?: Swarm['strategy']; minAgents?: number; maxAgents?: number; risk?: Swarm['risk']; approvedBy?: string }): Promise<Swarm> { await this.init(); return this.runtime.swarms.create(input); }
+  async formSwarm(swarmId: string, tasks: DynamicSwarmTask[]): Promise<SwarmFormationResult> { await this.init(); return this.runtime.swarms.form(swarmId, tasks); }
+  swarmStatus(swarmId: string): Swarm { return this.runtime.swarms.get(swarmId); }
+  swarmList(): Swarm[] { return this.runtime.swarms.list(); }
+  async scaleSwarm(swarmId: string, target: number): Promise<ScaleDecision> { await this.init(); return this.runtime.swarms.scale(swarmId, target); }
+  async switchSwarmTopology(swarmId: string, topology: DynamicSwarmTopology, reason?: string): Promise<import('../../swarm/src/index.js').TopologyDecision> { await this.init(); return this.runtime.swarms.switchTopology(swarmId, topology, reason); }
+  async addSwarmAgent(swarmId: string, agentId: AgentId, roles?: SwarmRole[]): Promise<Swarm['members'][number]> { await this.init(); return this.runtime.swarms.addAgent(swarmId, agentId, roles); }
+  async removeSwarmAgent(swarmId: string, agentId: AgentId, force = false): Promise<Swarm> { await this.init(); return this.runtime.swarms.removeAgent(swarmId, agentId, force); }
+  async replaceSwarmAgent(swarmId: string, oldAgentId: AgentId, newAgentId: AgentId): Promise<Swarm> { await this.init(); return this.runtime.swarms.replaceAgent(swarmId, oldAgentId, newAgentId); }
+  async delegateToSwarm(swarmId: string, task: DynamicSwarmTask, target: AgentId | SwarmRole | 'swarm'): Promise<DelegationRecord> { await this.init(); return this.runtime.swarms.delegate(swarmId, task, target); }
+  async handoffInSwarm(swarmId: string, taskId: string, fromAgentId: AgentId, toAgentId: AgentId, reason: string): Promise<{ delegation: DelegationRecord; handoff: HandoffRecord }> { await this.init(); return this.runtime.swarms.handoff(swarmId, taskId, fromAgentId, toAgentId, reason); }
+  async completeSwarmDelegation(swarmId: string, delegationId: string, success = true): Promise<DelegationRecord> { await this.init(); return this.runtime.swarms.completeDelegation(swarmId, delegationId, success); }
+  async recordSwarmFailure(swarmId: string, taskId: string, timedOut = false): Promise<SwarmHealthSnapshot> { await this.init(); return this.runtime.swarms.recordFailure(swarmId, taskId, timedOut); }
+  async rebalanceSwarm(swarmId: string, reason?: string): Promise<RebalanceResult> { await this.init(); return this.runtime.swarms.rebalance(swarmId, reason); }
+  async swarmHealth(swarmId: string): Promise<SwarmHealthSnapshot> { await this.init(); return this.runtime.swarms.monitor(swarmId); }
+  swarmCollaboration(swarmId: string): CollaborationGraph { return this.runtime.swarms.collaboration(swarmId); }
+  swarmCriticalPath(swarmId: string): string[] { return this.runtime.swarms.criticalPath(swarmId); }
+  swarmConsensus<T>(swarmId: string, votes: import('../../swarm/src/index.js').SwarmVote<T>[], strategy: 'MAJORITY' | 'UNANIMOUS' | 'WEIGHTED' = 'MAJORITY'): SwarmConsensusResult<T> { return this.runtime.swarms.consensus(swarmId, votes, strategy); }
+  swarmAggregate<T>(swarmId: string, results: { taskId: string; agentId?: AgentId; value?: T; success: boolean; score?: number; warning?: string }[]): SwarmResult<T> { return this.runtime.swarms.aggregate(swarmId, results); }
+  explainSwarm(swarmId: string): Record<string, unknown> { const swarm = this.runtime.swarms.get(swarmId); const health = this.runtime.swarms.health(swarmId); return { swarm: { id: swarm.id, state: swarm.state, topology: swarm.topology, coordinatorId: swarm.coordinatorId, memberCount: swarm.members.filter((member) => member.status !== 'left').length }, teamFormation: this.runtime.swarms.explainTeamFormation(swarmId), topology: this.runtime.swarms.explainTopology(swarmId), scale: this.runtime.swarms.explainScale(swarmId), coordinator: this.runtime.swarms.explainCoordinator(swarmId), handoff: this.runtime.swarms.explainHandoff(swarmId), rebalance: this.runtime.swarms.explainRebalance(swarmId), health }; }
 
   async observe(orchestrationId: string): Promise<{ orchestration: OrchestrationRecord; events: unknown[] }> { await this.init(); const orchestration = this.requireOrchestration(orchestrationId); return { orchestration: clone(orchestration), events: await this.runtime.events.read((event) => event.executionId === orchestrationId) }; }
   async evaluate(orchestrationId: string): Promise<import('./types.js').EvaluationResult> { await this.init(); const orchestration = this.requireOrchestration(orchestrationId); if (!orchestration.plan || !orchestration.analysis) throw new Error('orchestration has no plan or analysis'); orchestration.evaluation = this.evaluator.evaluate(orchestration.goal, orchestration.analysis, orchestration.plan, orchestration.steps, this.runtime.agents.list()); return clone(orchestration.evaluation); }

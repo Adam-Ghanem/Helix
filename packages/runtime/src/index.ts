@@ -15,6 +15,7 @@ import { SandboxExecutionRequest } from '../../core/src/index.js';
 import { ToolRegistry, PublicToolDefinition } from '../../tools/src/index.js';
 import { registerHelixMemoryTools } from '../../mcp/src/index.js';
 import { HelixOrchestrator, type OrchestratorOptions } from '../../intelligence/src/index.js';
+import { DynamicSwarmManager } from '../../swarm/src/index.js';
 
 export interface ProviderResult {
   output: unknown;
@@ -117,6 +118,7 @@ export class HelixRuntime {
   readonly telemetry: Telemetry;
   readonly sandbox: SandboxManager;
   readonly learning: PersistentLearningEngine;
+  readonly swarms: DynamicSwarmManager;
   readonly learningAsync: boolean;
   private readonly executions = new Map<string, ExecutionRecord>();
   private readonly graphs = new Map<string, TaskGraph>();
@@ -133,6 +135,7 @@ export class HelixRuntime {
     this.telemetry = options.telemetry ?? new Telemetry();
     this.sandbox = options.sandboxManager ?? new SandboxManager({ auditFile: defaultAuditFile(options.dataDirectory) });
     this.learning = options.learning ?? new PersistentLearningEngine(this.memory);
+    this.swarms = new DynamicSwarmManager({ agents: this.agents, router: this.router, scheduler: this.scheduler, memory: this.memory, subject: 'runtime', eventSink: async (event) => { await this.events.append({ type: event.type, payload: { swarmId: event.swarmId, ...event.payload } }); } });
     this.learningAsync = options.learningAsync ?? true;
   }
 
