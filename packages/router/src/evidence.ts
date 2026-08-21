@@ -31,13 +31,13 @@ export class RoutingEvidenceStore {
     const evidence: RouteEvidence = {
       request: input.request,
       decision: input.decision,
-      outcome: input.outcome,
+      ...(input.outcome === undefined ? {} : { outcome: input.outcome }),
       recordedAt: timestamp(),
     };
     await this.store.append({
       type: 'routing.evidence.recorded',
-      executionId: input.executionId,
-      taskId: input.taskId,
+      ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
       agentId: input.decision.agentId,
       payload: evidence,
     });
