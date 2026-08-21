@@ -1,24 +1,25 @@
-import { describe, expect, it } from 'vitest';
+import test from 'node:test';
+import assert from 'node:assert/strict';
 import { AGENT_TYPES, AgentRegistry } from '../packages/agents/src/index.js';
 
-describe('100-agent swarm registry', () => {
-  it('provides at least 25 specialized agent types', () => {
-    expect(AGENT_TYPES.length).toBeGreaterThanOrEqual(25);
-    expect(new Set(AGENT_TYPES.map((agent) => agent[0])).size).toBe(AGENT_TYPES.length);
+test('100-agent swarm registry', async (t) => {
+  await t.test('provides at least 25 specialized agent types', () => {
+    assert.ok(AGENT_TYPES.length >= 25);
+    assert.equal(new Set(AGENT_TYPES.map((agent) => agent.type)).size, AGENT_TYPES.length);
   });
 
-  it('seeds exactly 100 agents with specialized capabilities', () => {
+  await t.test('seeds exactly 100 agents with specialized capabilities', () => {
     const registry = new AgentRegistry(true, 100);
     const agents = registry.list();
-    expect(agents).toHaveLength(100);
-    expect(new Set(agents.map((agent) => agent.name)).size).toBe(100);
-    expect(agents.every((agent) => agent.status === 'idle')).toBe(true);
-    expect(agents.every((agent) => agent.capabilities.length > 0)).toBe(true);
+    assert.equal(agents.length, 100);
+    assert.equal(new Set(agents.map((agent) => agent.name)).size, 100);
+    assert.ok(agents.every((agent) => agent.status === 'idle'));
+    assert.ok(agents.every((agent) => agent.capabilities.length > 0));
   });
 
-  it('supports an empty registry for externally managed agent pools', () => {
+  await t.test('supports an empty registry for externally managed agent pools', () => {
     const registry = new AgentRegistry(false);
-    expect(registry.list()).toHaveLength(0);
-    expect(registry.seed(5)).toHaveLength(5);
+    assert.equal(registry.list().length, 0);
+    assert.equal(registry.seed(5).length, 5);
   });
 });
