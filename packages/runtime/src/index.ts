@@ -6,11 +6,14 @@ import { defaultPlan, TaskGraph } from '../../planner/src/index.js';
 import { AgentRouter, RoutingCandidate } from '../../router/src/index.js';
 import { PolicyEngine, secureDefaultRules } from '../../policy/src/index.js';
 import { LeaseScheduler } from '../../scheduler/src/index.js';
-import { MemoryQuery, MemoryRecord, MemoryStore } from '../../memory/src/index.js';
+import { MemoryQuery, MemoryRecord, MemoryStore, MemoryAccessContext, MemoryEntry, MemoryEntryInput, MemorySearchOptions, TaskOutcomeLearningInput } from '../../memory/src/index.js';
+import { PersistentLearningEngine } from '../../learning/src/intelligence.js';
 import { Telemetry } from '../../observability/src/index.js';
 import { defaultAuditFile, SandboxManager } from '../../sandbox/src/index.js';
 import { defaultSandboxPolicy, SandboxPolicy } from '../../sandbox/src/types.js';
 import { SandboxExecutionRequest } from '../../core/src/index.js';
+import { ToolRegistry, PublicToolDefinition } from '../../tools/src/index.js';
+import { registerHelixMemoryTools } from '../../mcp/src/index.js';
 
 export interface ProviderResult {
   output: unknown;
@@ -91,6 +94,7 @@ export interface RuntimeOptions {
   memory?: MemoryStore;
   telemetry?: Telemetry;
   sandboxManager?: SandboxManager;
+  learning?: PersistentLearningEngine;
 }
 
 export interface ExecutionView {
@@ -109,6 +113,7 @@ export class HelixRuntime {
   readonly memory: MemoryStore;
   readonly telemetry: Telemetry;
   readonly sandbox: SandboxManager;
+  readonly learning: PersistentLearningEngine;
   private readonly executions = new Map<string, ExecutionRecord>();
   private readonly graphs = new Map<string, TaskGraph>();
   private initialized = false;
@@ -123,6 +128,7 @@ export class HelixRuntime {
     this.memory = options.memory ?? new MemoryStore(options.dataDirectory);
     this.telemetry = options.telemetry ?? new Telemetry();
     this.sandbox = options.sandboxManager ?? new SandboxManager({ auditFile: defaultAuditFile(options.dataDirectory) });
+    this.learning = options.learning ?? new PersistentLearningEngine(this.memory);
   }
 
   async init(): Promise<void> {
@@ -163,6 +169,11 @@ export class HelixRuntime {
     if (sandboxResult) {
       completed.result = { ...(completed.result as Record<string, unknown>), sandbox: sandboxResult };
       await this.events.append({ type: 'sandbox.execution.completed', executionId: execution.id, payload: sandboxResult });
+      try {
+        await this.learning.recordSandboxResult(execution.id, sandboxResult);
+      } catch (error) {
+        await this.events.append({ type: 'learning.persistence.failed', executionId: execution.id, payload: { error: error instanceof Error ? error.message : String(error) } });
+      }
     }
     this.telemetry.endSpan(executionSpan, completed.status === 'failed' ? 'error' : 'ok', completed.error);
     this.telemetry.recordMetric('helix.execution.completed', 1, { status: completed.status, provider: this.provider.name });
@@ -191,9 +202,66 @@ export class HelixRuntime {
     return this.memory.store(input);
   }
 
+  async rememberEntry(input: MemoryEntryInput, context?: MemoryAccessContext): Promise<MemoryEntry> {
+    await this.init();
+    return this.memory.create(input, context);
+  }
+
   async recall(query: MemoryQuery) {
     await this.init();
     return this.memory.search(query);
+  }
+
+  async searchMemory(options: MemorySearchOptions) {
+    await this.init();
+    return this.memory.searchEntries(options);
+  }
+
+  async getMemory(memoryId: string, context?: MemoryAccessContext): Promise<MemoryEntry> {
+    await this.init();
+    return this.memory.get(memoryId, context);
+  }
+
+  async updateMemory(memoryId: string, input: Parameters<MemoryStore['update']>[1], context: MemoryAccessContext): Promise<MemoryEntry> {
+    await this.init();
+    return this.memory.update(memoryId, input, context);
+  }
+
+  async deleteMemory(memoryId: string, context: MemoryAccessContext): Promise<void> {
+    await this.init();
+    return this.memory.delete(memoryId, context);
+  }
+
+  async memoryStats(context?: MemoryAccessContext) {
+    await this.init();
+    return this.memory.stats(context);
+  }
+
+  async learningHints(taskType: string, requiredCapabilities: string[], context?: MemoryAccessContext) {
+    await this.init();
+    return this.learning.suggestRouting({ taskType, requiredCapabilities, complexity: 0.5 }, context);
+  }
+
+  async agentExperience(agentId: string) {
+    await this.init();
+    return this.learning.getAgentExperience(agentId);
+  }
+
+  async recordLearningOutcome(input: TaskOutcomeLearningInput): Promise<MemoryEntry[]> {
+    await this.init();
+    return input.success ? this.learning.recordSuccess(input) : this.learning.recordFailure(input);
+  }
+
+  registerMemoryTools(registry: ToolRegistry): PublicToolDefinition[] {
+    return registerHelixMemoryTools(registry, {
+      search: async (input) => this.searchMemory({ query: stringInput(input, 'query'), limit: 20, context: { subject: stringInput(input, 'subject', 'mcp-user') } }),
+      get: async (input) => this.getMemory(stringInput(input, 'id'), { subject: stringInput(input, 'subject', 'mcp-user') }),
+      list: async (input) => this.memory.listEntries({ subject: stringInput(input, 'subject', 'mcp-user') }),
+      stats: async (input) => this.memoryStats({ subject: stringInput(input, 'subject', 'mcp-user') }),
+      recall: async (input) => this.searchMemory({ query: stringInput(input, 'query'), types: ['solution', 'pattern', 'failure', 'routing-hint'], limit: 20, context: { subject: stringInput(input, 'subject', 'mcp-user') } }),
+      routingHints: async (input) => this.learningHints(stringInput(input, 'taskType'), arrayInput(input, 'capabilities'), { subject: stringInput(input, 'subject', 'mcp-user') }),
+      agentExperience: async (input) => this.agentExperience(stringInput(input, 'agentId')),
+    });
   }
 
   telemetrySnapshot() {
@@ -315,9 +383,12 @@ export class HelixRuntime {
   }
 
   private async runTask(execution: ExecutionRecord, graph: TaskGraph, task: TaskRecord): Promise<void> {
+    const taskStarted = Date.now();
     const request = { taskType: task.title.toLowerCase().replaceAll(' ', '-'), requiredCapabilities: ['analysis'], complexity: 0.5, maxCostUsd: execution.budget.maxCostUsd };
     const candidates: RoutingCandidate[] = this.agents.list().map((agent) => ({ agent, estimatedCostUsd: 0, availability: agent.status === 'idle' ? 1 : 0.5, memoryRelevance: 0.5 }));
-    const route = this.router.route(request, candidates, 'adaptive');
+    const learningScores = await this.learning.routingScores(request, candidates);
+    const enrichedCandidates = candidates.map((candidate) => ({ ...candidate, learningBonus: learningScores.get(candidate.agent.id) ?? 0 }));
+    const route = this.router.route(request, enrichedCandidates, 'adaptive');
     const agent = this.agents.get(route.agentId);
     graph.update(task.id, { assignedAgentId: agent.id, attempts: task.attempts + 1 });
     graph.setStatus(task.id, 'running');
@@ -336,13 +407,26 @@ export class HelixRuntime {
       if (execution.usage.tokens > execution.budget.maxTokens || execution.usage.costUsd > execution.budget.maxCostUsd) throw new Error('Execution exceeded token or cost budget');
       graph.update(task.id, { result: result.output });
       graph.setStatus(task.id, 'completed');
-      this.agents.recordOutcome(agent.id, { taskType: request.taskType, domain: 'general', success: true, quality: result.quality, latencyMs: 0, tokens: result.tokens, costUsd: result.costUsd });
+      this.agents.recordOutcome(agent.id, { taskType: request.taskType, domain: 'general', success: true, quality: result.quality, latencyMs: Date.now() - taskStarted, tokens: result.tokens, costUsd: result.costUsd });
       await this.events.append({ type: 'task.completed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { result: result.output, evaluation: { success: true, quality: result.quality, provider: this.provider.name } } });
+      try {
+        const learned = await this.learning.recordSuccess({ executionId: execution.id, taskId: task.id, taskType: request.taskType, agentId: agent.id, capabilities: request.requiredCapabilities, success: true, quality: result.quality, executionTimeMs: Date.now() - taskStarted, attempts: task.attempts + 1, output: result.output });
+        await this.events.append({ type: 'learning.outcome.recorded', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { success: true, memoryIds: learned.map((entry) => entry.id) } });
+      } catch (learningError) {
+        await this.events.append({ type: 'learning.persistence.failed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { error: learningError instanceof Error ? learningError.message : String(learningError) } });
+      }
     } catch (error) {
       graph.update(task.id, { error: error instanceof Error ? error.message : String(error) });
       graph.setStatus(task.id, 'failed');
-      this.agents.recordOutcome(agent.id, { taskType: request.taskType, domain: 'general', success: false, quality: 0, latencyMs: 0, tokens: 0 });
-      await this.events.append({ type: 'task.failed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { error: error instanceof Error ? error.message : String(error) } });
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.agents.recordOutcome(agent.id, { taskType: request.taskType, domain: 'general', success: false, quality: 0, latencyMs: Date.now() - taskStarted, tokens: 0 });
+      await this.events.append({ type: 'task.failed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { error: errorMessage } });
+      try {
+        const learned = await this.learning.recordFailure({ executionId: execution.id, taskId: task.id, taskType: request.taskType, agentId: agent.id, capabilities: request.requiredCapabilities, success: false, quality: 0, executionTimeMs: Date.now() - taskStarted, attempts: task.attempts + 1, error: errorMessage });
+        await this.events.append({ type: 'learning.outcome.recorded', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { success: false, memoryIds: learned.map((entry) => entry.id) } });
+      } catch (learningError) {
+        await this.events.append({ type: 'learning.persistence.failed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { error: learningError instanceof Error ? learningError.message : String(learningError) } });
+      }
     } finally {
       if (lease) this.scheduler.release(lease.id);
       this.agents.setStatus(agent.id, 'idle');
@@ -398,5 +482,8 @@ export class HelixRuntime {
     return graph;
   }
 }
+
+function stringInput(input: Record<string, unknown>, key: string, fallback?: string): string { const value = input[key]; if (typeof value === 'string' && value.trim()) return value; if (fallback !== undefined) return fallback; throw new Error(`MCP input requires ${key}`); }
+function arrayInput(input: Record<string, unknown>, key: string): string[] { const value = input[key]; return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []; }
 
 export { DEFAULT_BUDGET };
