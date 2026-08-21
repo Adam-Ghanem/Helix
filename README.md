@@ -139,9 +139,9 @@ The benchmark uses 100 agents, 1,000 tasks, and 10,000 seeded memories. It repor
 
 ## M11 full MCP ecosystem
 
-M11 adds an official `@modelcontextprotocol/sdk` adapter over existing Helix capabilities. The server registers **176 unique typed tools** across agents, tasks, scheduler, workers, swarm, memory, learning, sandbox, security, policy, providers, models, workflows, evaluation, federation, system, GitHub boundary, filesystem, browser boundary, and events families. Each tool has a unique name, Zod input schema, family, risk classification, permissions, deterministic error category, authorization check, rate-limit bucket, and sanitized audit record.
+M11 adds an official `@modelcontextprotocol/sdk` adapter over existing Helix capabilities. The server registers **190 unique typed tools** across agents, tasks, scheduler, workers, swarm, memory, learning, sandbox, security, policy, providers, models, workflows, evaluation, federation, system, GitHub boundary, filesystem, browser boundary, events, and intelligence families. Each tool has a unique name, Zod input schema, family, risk classification, permissions, deterministic error category, authorization check, rate-limit bucket, and sanitized audit record.
 
-The server also exposes eight protected resources and six policy-aware prompts. Supported transports are official SDK stdio and Streamable HTTP:
+The server also exposes eleven protected resources and ten policy-aware prompts. Supported transports are official SDK stdio and Streamable HTTP:
 
 ```bash
 helix mcp doctor --json
@@ -153,6 +153,33 @@ pnpm mcp:serve:http
 ```
 
 The Streamable HTTP endpoint binds to `http://127.0.0.1:8790/mcp` by default. Claude Code can register the local server with `claude mcp add helix -- pnpm --dir /path/to/Helix mcp:serve`. The default MCP actor is read-only; writes, sandbox execution, administrative policy operations, and remote federation operations require stronger roles or remain denied by default. GitHub and browser families report an explicit unconfigured boundary rather than making hidden external calls. See [`docs/milestone-11-mcp.md`](docs/milestone-11-mcp.md) for the tool-family inventory, resources, prompts, transport details, benchmark, and limitations.
+
+## M12 autonomous intelligence
+
+M12 adds a deterministic autonomous orchestration layer above the existing runtime. A goal is analyzed into category, capabilities, complexity, risk, topology, dependencies, and expected agent types; a bounded category-aware planner creates a typed task plan; validation checks cycles, dependencies, capability satisfiability, topology, and security constraints; the existing router selects compatible agents; and the existing scheduler, workers, sandbox, memory, and learning components remain authoritative during execution.
+
+The orchestration lifecycle is durable and explainable: `CREATED → ANALYZING → PLANNING → VALIDATING → READY → RUNNING → EVALUATING`, with bounded replanning and terminal `COMPLETED`, `FAILED`, or `CANCELLED` states. High- and critical-risk plans require explicit authorization. Learning hints are advisory and bounded at ten percent; they cannot override capability mismatches, policy denial, approval requirements, memory ACLs, or sandbox controls. All autonomous loops are bounded by retry, replan, iteration, task-count, depth, and fan-out limits.
+
+Use the new CLI surfaces as follows:
+
+```bash
+helix goal create --title "Build a reporting module" --description "Implement and test a reliable reporting module"
+helix goal analyze <goal-id>
+helix plan create <goal-id>
+helix plan validate <plan-id>
+helix plan show <plan-id>
+helix orchestrate --title "Document the benchmark" --description "Write and review a concise benchmark outcome"
+helix orchestrate status <orchestration-id>
+```
+
+The versioned API exposes goal, plan, and orchestration lifecycle routes. M11 MCP adds fourteen typed intelligence tools, three protected intelligence resources, and four reusable prompts through the existing authorization, rate-limiting, audit, and transport boundary. Run the deterministic demonstration and benchmark with:
+
+```bash
+pnpm intelligence:demo
+pnpm intelligence:benchmark
+```
+
+The benchmark uses 100 registered agents and 1,000 measured capability-safe task-unit selections, plus a full orchestration run. It reports measured p50/p95/p99 and average selection latency, throughput, plan validation, completion, replanning, CPU, and heap data. Results are local measurements rather than production capacity guarantees. See [`docs/milestone-12-intelligence.md`](docs/milestone-12-intelligence.md) for architecture, state transitions, security, learning, verification, and limitations.
 
 ## License
 

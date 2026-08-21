@@ -3,59 +3,69 @@ flowchart TD
   User --> CLI[helix CLI]
   API --> Runtime[Helix Runtime]
   CLI --> Runtime
-  Runtime --> Recall[Fast Cached Recall]
-  Recall --> Cache[TTL/LRU MemoryCache]
-  Cache --> Search[Bounded Hybrid Search]
-  Search --> Indexes[SQLite indexes + FTS5 candidates]
-  Indexes --> Router[Adaptive Router]
-  Runtime --> Router
-  Router --> Planner[Validated Task DAG]
-  Router --> Agents[Agent Registry + Health + Reputation]
-  Runtime --> Scheduler[Lease Scheduler + Durable Leases]
-  Runtime --> Policy[Default-deny Policy + RBAC + Approvals]
-  Runtime --> Provider[Provider Interface]
-  Runtime --> Events[Durable Event Store]
-  Events --> Replay[Replay + Atomic Snapshots]
-  Runtime --> Memory[MemoryBackend]
-  Memory --> SQLite[SqliteMemoryStore
-WAL + transactions + indexes]
-  Memory --> JSONL[MemoryStore
-M9 compatibility]
-  Memory --> ACL[Namespace ACL + Provenance]
-  Memory --> Compaction[Compaction + VACUUM + JSONL migration]
-  Runtime --> Learning[Persistent Learning Engine]
-  Learning --> Queue[Bounded Async Learning Queue]
-  Queue --> Batch[Batch outcome persistence]
-  Batch --> Memory
-  Learning --> Outcome[Outcome Sanitization + Idempotency]
-  Outcome --> Memory
-  Learning --> Bonus[Bounded Learning Bonus <= 10%]
-  Bonus --> Router
-  Runtime --> Telemetry[Traces + Metrics + Logs]
-  Runtime --> SandboxManager[SandboxManager]
-  SandboxManager --> SandboxPolicy[Canonical Paths + Exec Allowlist + Env Filter]
-  SandboxManager --> Local[LocalSandbox
-Best-effort controls]
-  SandboxManager --> Docker[DockerSandbox
-Kernel/container controls]
-  Local --> Execution[Bounded Command Execution]
+
+  Runtime --> Goal[Goal model]
+  Goal --> Analysis[Deterministic goal analysis]
+  Analysis --> Decomposer[Bounded category-aware decomposition]
+  Decomposer --> IntelligencePlanner[Intelligence Planner]
+  IntelligencePlanner --> Plan[Typed Execution Plan]
+  Plan --> Validator[Plan Validator]
+  Validator -->|valid + authorized| Selector[Capability-first agent selector]
+  Validator -->|invalid or unauthorized| Reject[Typed rejection / approval required]
+  Selector --> Team[Swarm team + topology]
+  Team --> ExistingRouter[Existing AgentRouter]
+  ExistingRouter --> Agents[Agent Registry + health + reputation]
+  Team --> Scheduler[Existing Lease Scheduler + durable leases]
+  Scheduler --> Workers[Existing workers / task execution]
+  Workers --> SandboxManager[Existing SandboxManager]
+  SandboxManager --> SandboxPolicy[Canonical paths + exec allowlist + env filter]
+  SandboxPolicy --> Local[LocalSandbox best-effort controls]
+  SandboxPolicy --> Docker[DockerSandbox kernel/container controls]
+  Local --> Execution[Bounded command execution]
   Docker --> Execution
-  Execution --> Audit[SandboxAuditLog]
-  Audit --> Events
-  Runtime --> Knowledge[Local Knowledge Graph]
-  Runtime --> MCP[M11 MCP Server]
-  MCP --> Registry[176 Typed Tool Registry]
-  Registry --> Families[20 Capability Families]
-  MCP --> Resources[8 Protected Resources]
-  MCP --> Prompts[6 Policy-aware Prompts]
-  MCP --> Auth[Actor Authorization + Rate Limits]
+  Execution --> StepEvidence[Sanitized step evidence]
+  StepEvidence --> Evaluator[Evidence-based evaluator]
+  Evaluator -->|complete| Complete[COMPLETED]
+  Evaluator -->|failure / timeout| Replanner[Bounded Intelligence Replanner]
+  Replanner -->|alternative available and limits remain| Selector
+  Replanner -->|no alternative or limit reached| Failed[FAILED]
+  Runtime --> Cancel[Durable cancellation guard]
+  Cancel --> Cancelled[CANCELLED]
+
+  Analysis --> Recall[Advisory M10 memory recall]
+  Recall --> Cache[TTL/LRU MemoryCache]
+  Cache --> Search[Bounded hybrid search]
+  Search --> Indexes[SQLite indexes + FTS5 candidates]
+  Indexes --> Memory[SqliteMemoryStore]
+  Memory --> ACL[Namespace ACL + provenance + sanitization]
+  ACL --> Recall
+  Evaluator --> Learning[Persistent Learning Engine]
+  Learning --> Queue[Bounded async learning queue]
+  Queue --> Batch[Transactional batch persistence]
+  Batch --> Memory
+  Learning --> Bonus[Bounded learning signal <= 10%]
+  Bonus --> ExistingRouter
+  StepEvidence --> Events[Durable event store]
+  Events --> Replay[Replay + restart recovery]
+  Runtime --> Telemetry[Traces + metrics + structured logs]
+
+  Runtime --> Policy[Default-deny Policy + RBAC + Approvals]
+  Policy -. guards .-> Validator
+  Policy -. guards .-> Workers
+  Policy -. guards .-> SandboxManager
+  Runtime --> Provider[Provider interface]
+  Provider --> Models[Provider / model discovery]
+  Runtime --> Knowledge[Local knowledge graph]
+
+  Runtime --> MCP[M11/M12 MCP Server]
+  MCP --> Registry[190 typed tool registry]
+  Registry --> Families[21 capability families]
+  MCP --> Resources[11 protected resources]
+  MCP --> Prompts[10 policy-aware prompts]
+  MCP --> Auth[Actor authorization + rate limits + audit]
   Auth --> Policy
-  Registry --> McpAudit[Sanitized MCP Audit Log]
+  Registry --> McpAudit[Sanitized MCP audit log]
   McpAudit --> Events
-  MCP --> Stdio[Official SDK Stdio Transport]
+  MCP --> Stdio[Official SDK stdio transport]
   MCP --> HTTP[Official SDK Streamable HTTP]
-  Policy -. guarded boundary .-> Tools[Tool / MCP adapters]
-  Policy -. plugin permissions .-> Plugins[Trusted Plugin Registry]
-  Provider --> Models[Provider / Model Discovery]
-  Scheduler -. signed protocol foundation .-> Nodes[Remote Helix nodes]
-  Runtime --> Dashboard[Read-only Dashboard]
+  Runtime --> Dashboard[Read-only dashboard]
