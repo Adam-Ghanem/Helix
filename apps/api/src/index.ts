@@ -99,9 +99,8 @@ const server = createServer(async (request, response) => {
     if (url.pathname === '/api/v1/executions' && request.method === 'POST') {
       const input = await body(request);
       if (typeof input.goal !== 'string' || !input.goal.trim()) return json(response, 400, { error: 'goal is required' });
-      const execution = typeof input.budget === 'object' && input.budget
-        ? await runtime.execute({ goal: input.goal, budget: input.budget as never })
-        : await runtime.execute({ goal: input.goal });
+      const executionRequest = { goal: input.goal, ...(typeof input.budget === 'object' && input.budget ? { budget: input.budget as never } : {}), ...(typeof input.sandbox === 'object' && input.sandbox ? { sandbox: input.sandbox as never } : {}) };
+      const execution = await runtime.execute(executionRequest);
       return json(response, 201, execution);
     }
     if (url.pathname === '/api/v1/executions' && request.method === 'GET') {
@@ -130,6 +129,11 @@ const server = createServer(async (request, response) => {
     if (executionMatch && request.method === 'GET') return json(response, 200, await runtime.view(executionMatch[1]!));
     if (url.pathname === '/api/v1/events' && request.method === 'GET') return json(response, 200, { events: await runtime.events.read() });
     if (url.pathname === '/api/v1/recover' && request.method === 'POST') return json(response, 200, { recovered: await runtime.recover(), sequence: runtime.events.lastSequence });
+    if (url.pathname === '/api/v1/sandboxes' && request.method === 'GET') return json(response, 200, { sandboxes: runtime.sandbox.list() });
+    const sandboxMatch = url.pathname.match(/^\/api\/v1\/sandboxes\/([^/]+)$/);
+    if (sandboxMatch && request.method === 'GET') { const sandboxId = sandboxMatch[1]!; return json(response, 200, { sandbox: runtime.sandbox.status(sandboxId), audits: runtime.sandbox.audits(sandboxId) }); }
+    const sandboxDestroyMatch = url.pathname.match(/^\/api\/v1\/sandboxes\/([^/]+)\/destroy$/);
+    if (sandboxDestroyMatch && request.method === 'POST') return json(response, 200, await runtime.sandbox.destroy(sandboxDestroyMatch[1]!));
     if (url.pathname === '/api/v1/verify' && request.method === 'GET') return json(response, 200, { ok: true, sequence: runtime.events.lastSequence, provider: runtime.provider.name, dataDirectory });
     return json(response, 404, { error: 'not_found' });
   } catch (error) {

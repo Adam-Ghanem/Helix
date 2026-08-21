@@ -8,6 +8,9 @@ import { PolicyEngine, secureDefaultRules } from '../../policy/src/index.js';
 import { LeaseScheduler } from '../../scheduler/src/index.js';
 import { MemoryQuery, MemoryRecord, MemoryStore } from '../../memory/src/index.js';
 import { Telemetry } from '../../observability/src/index.js';
+import { defaultAuditFile, SandboxManager } from '../../sandbox/src/index.js';
+import { defaultSandboxPolicy, SandboxPolicy } from '../../sandbox/src/types.js';
+import { SandboxExecutionRequest } from '../../core/src/index.js';
 
 export interface ProviderResult {
   output: unknown;
@@ -87,6 +90,7 @@ export interface RuntimeOptions {
   scheduler?: LeaseScheduler;
   memory?: MemoryStore;
   telemetry?: Telemetry;
+  sandboxManager?: SandboxManager;
 }
 
 export interface ExecutionView {
@@ -104,6 +108,7 @@ export class HelixRuntime {
   readonly provider: ModelProvider;
   readonly memory: MemoryStore;
   readonly telemetry: Telemetry;
+  readonly sandbox: SandboxManager;
   private readonly executions = new Map<string, ExecutionRecord>();
   private readonly graphs = new Map<string, TaskGraph>();
   private initialized = false;
@@ -117,12 +122,14 @@ export class HelixRuntime {
     this.provider = options.provider ?? new DeterministicProvider();
     this.memory = options.memory ?? new MemoryStore(options.dataDirectory);
     this.telemetry = options.telemetry ?? new Telemetry();
+    this.sandbox = options.sandboxManager ?? new SandboxManager({ auditFile: defaultAuditFile(options.dataDirectory) });
   }
 
   async init(): Promise<void> {
     if (this.initialized) return;
     await this.events.init();
     await this.memory.init();
+    await this.sandbox.init();
     for (const event of await this.events.read()) this.rebuild(event);
     this.initialized = true;
   }
@@ -150,11 +157,33 @@ export class HelixRuntime {
     await this.events.append({ type: 'execution.started', executionId: execution.id, payload: { execution, idempotencyKey: `execution:${execution.id}:started` }, idempotencyKey: `execution:${execution.id}:started` });
     for (const task of tasks) await this.events.append({ type: 'task.created', executionId: execution.id, taskId: task.id, payload: task, idempotencyKey: `task:${task.id}:created` });
     await this.events.append({ type: 'plan.created', executionId: execution.id, payload: { taskIds: execution.taskIds, criticalPathMs: graph.criticalPathMs() } });
+    const sandboxResult = input.sandbox?.enabled && input.sandbox.command ? await this.executeSandboxRequest(input.sandbox, execution.id) : undefined;
     await this.runExecution(execution.id);
     const completed = this.executions.get(execution.id)!;
+    if (sandboxResult) {
+      completed.result = { ...(completed.result as Record<string, unknown>), sandbox: sandboxResult };
+      await this.events.append({ type: 'sandbox.execution.completed', executionId: execution.id, payload: sandboxResult });
+    }
     this.telemetry.endSpan(executionSpan, completed.status === 'failed' ? 'error' : 'ok', completed.error);
     this.telemetry.recordMetric('helix.execution.completed', 1, { status: completed.status, provider: this.provider.name });
     return structuredClone(completed);
+  }
+
+  private async executeSandboxRequest(request: SandboxExecutionRequest, executionId: string) {
+    if (!request.command) throw new Error('Sandbox command is required when sandboxing is enabled');
+    const workspace = request.policy?.workspacePath ?? process.cwd();
+    const defaults = defaultSandboxPolicy(workspace);
+    const policy: SandboxPolicy = { ...defaults, ...request.policy, allowedExecutables: request.policy?.allowedExecutables ?? defaults.allowedExecutables, allowedPaths: request.policy?.allowedPaths ?? defaults.allowedPaths, deniedPaths: request.policy?.deniedPaths ?? defaults.deniedPaths, environmentAllowlist: request.policy?.environmentAllowlist ?? defaults.environmentAllowlist };
+    const created = await this.sandbox.create({ policy, executionId, ...(request.backend ? { backend: request.backend } : {}) });
+    await this.events.append({ type: 'sandbox.created', executionId, payload: created });
+    await this.sandbox.start(created.sandboxId);
+    await this.events.append({ type: 'sandbox.started', executionId, payload: this.sandbox.status(created.sandboxId) });
+    try {
+      return await this.sandbox.exec(created.sandboxId, { command: request.command.command, args: request.command.args ?? [], cwd: request.command.cwd ?? '.', env: request.command.env ?? {}, ...(request.command.stdin !== undefined ? { stdin: request.command.stdin } : {}), ...(request.command.timeoutMs !== undefined ? { timeoutMs: request.command.timeoutMs } : {}) });
+    } finally {
+      await this.sandbox.destroy(created.sandboxId);
+      await this.events.append({ type: 'sandbox.destroyed', executionId, payload: this.sandbox.status(created.sandboxId) });
+    }
   }
 
   async remember(input: Omit<MemoryRecord, 'id' | 'createdAt' | 'updatedAt'>): Promise<MemoryRecord> {

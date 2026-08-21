@@ -2,6 +2,7 @@
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
+import { defaultSandboxPolicy, dockerAvailable } from '../../../packages/sandbox/src/index.js';
 
 const args = process.argv.slice(2);
 const jsonOutput = args.includes('--json');
@@ -18,7 +19,7 @@ function print(value: unknown): void {
 }
 
 function help(): void {
-  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
+  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix sandbox doctor [--json]\n  helix sandbox run [--docker] [--network none] [--memory MB] [--timeout 10s] -- <command> [args...]\n  helix sandbox status [--json]\n  helix sandbox destroy <id> [--json]\n  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
 }
 
 async function main(): Promise<void> {
@@ -60,6 +61,33 @@ async function main(): Promise<void> {
     const approval = action === 'approve' ? runtime.policy.approve(approvalId, 'cli-user') : runtime.policy.deny(approvalId, 'cli-user');
     await runtime.events.append({ type: `approval.${approval.status}`, executionId: approval.executionId, agentId: approval.requestedBy, payload: approval });
     return print(approval);
+  }
+  if (command === 'sandbox') {
+    const action = args[1];
+    if (action === 'doctor') return print({ local: { available: true, networkDefault: 'none', isolation: 'best-effort' }, docker: { available: await dockerAvailable(), requiredFlags: ['--read-only', '--cap-drop ALL', '--security-opt no-new-privileges', '--pids-limit', '--memory', '--cpus', '--network none'] } });
+    if (action === 'status') return print({ sandboxes: runtime.sandbox.list() });
+    if (action === 'destroy') { if (!args[2]) throw new Error('Usage: helix sandbox destroy <id>'); return print(await runtime.sandbox.destroy(args[2])); }
+    if (action === 'run') {
+      const separator = args.indexOf('--');
+      if (separator < 0 || !args[separator + 1]) throw new Error('Usage: helix sandbox run [options] -- <command> [args...]');
+      const commandName = args[separator + 1]!;
+      const commandArgs = args.slice(separator + 2);
+      const workspace = process.env.HELIX_SANDBOX_WORKSPACE ?? process.cwd();
+      const timeoutText = args[args.indexOf('--timeout') + 1] ?? '30s';
+      const timeoutMatch = timeoutText.match(/^(\d+)(ms|s|m)$/);
+      if (!timeoutMatch) throw new Error('--timeout must use ms, s, or m');
+      const timeoutUnits = Number(timeoutMatch[1]);
+      const timeoutMs = timeoutMatch[2] === 'm' ? timeoutUnits * 60_000 : timeoutMatch[2] === 's' ? timeoutUnits * 1_000 : timeoutUnits;
+      const network = args[args.indexOf('--network') + 1] ?? 'none';
+      if (!['none', 'host', 'bridge', 'custom'].includes(network)) throw new Error('--network must be none, host, bridge, or custom');
+      const memoryLimitMb = Number(args[args.indexOf('--memory') + 1] ?? 512);
+      if (!Number.isFinite(memoryLimitMb) || memoryLimitMb <= 0) throw new Error('--memory must be positive');
+      const sandboxPolicy = { ...defaultSandboxPolicy(workspace), allowedExecutables: [commandName], timeoutMs, memoryLimitMb, networkMode: network as 'none' | 'host' | 'bridge' | 'custom', allowNetwork: network !== 'none' };
+      const created = await runtime.sandbox.create({ policy: sandboxPolicy, backend: args.includes('--docker') ? 'docker' : 'local' });
+      try { await runtime.sandbox.start(created.sandboxId); return print(await runtime.sandbox.exec(created.sandboxId, { command: commandName, args: commandArgs, cwd: '.', env: {} })); }
+      finally { await runtime.sandbox.destroy(created.sandboxId); }
+    }
+    throw new Error('Usage: helix sandbox <doctor|run|status|destroy>');
   }
   if (command === 'verify') return print({ ok: true, sequence: runtime.events.lastSequence, provider: runtime.provider.name, dataDirectory });
   if (command === 'recover') return print({ recovered: await runtime.recover(), sequence: runtime.events.lastSequence });
