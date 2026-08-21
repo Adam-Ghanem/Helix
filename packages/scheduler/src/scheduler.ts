@@ -68,7 +68,9 @@ export class AgentScheduler {
     this.recoverExpired(now);
     this.rebalance();
     const assigned: SchedulerTask[] = [];
-    while (assigned.length < this.maxAssignmentsPerTick) {
+    let blocked = 0;
+    const initialQueueSize = this.queue.size();
+    while (assigned.length < this.maxAssignmentsPerTick && blocked < initialQueueSize) {
       const candidate = this.queue.dequeue((task) => {
         const current = this.tasks.get(task.id);
         return Boolean(current && current.status === 'pending' && dependenciesSatisfied(current, this.tasks));
@@ -79,13 +81,15 @@ export class AgentScheduler {
       const routed = this.router.select({ task, agents: this.registry.list(), load: this.load });
       if (!routed) {
         this.queue.enqueue(task);
-        break;
+        blocked += 1;
+        continue;
       }
       const reservation = this.load.reserve(task.id, routed.agentId, this.reservationTtlMs, true);
       if (!reservation) {
         this.queue.enqueue(task);
+        blocked += 1;
         this.emit({ type: 'agent.overloaded', taskId: task.id, agentId: routed.agentId, timestamp: new Date(now).toISOString() });
-        break;
+        continue;
       }
       task.status = 'assigned';
       task.assignedAgentId = routed.agentId;
