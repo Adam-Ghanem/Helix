@@ -2,6 +2,8 @@
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
+import { defaultSandboxPolicy, dockerAvailable } from '../../../packages/sandbox/src/index.js';
+import { HelixMcpServer, MCP_TOOL_FAMILY_COUNTS } from '../../../packages/mcp/src/index.js';
 
 const args = process.argv.slice(2);
 const jsonOutput = args.includes('--json');
@@ -16,9 +18,58 @@ function print(value: unknown): void {
   else if (typeof value === 'string') console.log(value);
   else console.log(JSON.stringify(value, null, 2));
 }
+function option(name: string): string | undefined { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; }
 
 function help(): void {
-  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
+  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix sandbox doctor [--json]\n  helix sandbox run [--docker] [--network none] [--memory MB] [--timeout 10s] -- <command> [args...]\n  helix sandbox status [--json]\n  helix sandbox destroy <id> [--json]
+  helix memory search "<query>" [--json]
+  helix memory list [--json]
+  helix memory inspect <id> [--json]
+  helix memory stats [--json]
+  helix memory compact [--vacuum] [--expired] [--json]
+  helix learning agent <agentId> [--json]
+  helix learning flush [--json]
+  helix learning hints "<task>" [--json]
+  helix goal create "<title>" [--description "..."] [--json]
+  helix goal analyze <goalId> [--json]
+  helix plan create <goalId> [--json]
+  helix plan validate <planId> [--json]
+  helix plan show <planId> [--json]
+  helix orchestrate --title "..." --description "..." [--approved-by <actor>] [--json]
+  helix orchestrate status <orchestrationId> [--json]
+  helix orchestrate cancel <orchestrationId> [--json]
+  helix swarm create --goal "..." [--topology adaptive] [--max-agents 12] [--json]
+  helix swarm status <swarmId> [--json]
+  helix swarm members <swarmId> [--json]
+  helix swarm scale <swarmId> <count> [--json]
+  helix swarm rebalance <swarmId> [--json]
+  helix swarm delegate <swarmId> <taskId> <capability> [--target <agent|ROLE|swarm>] [--json]
+  helix swarm handoff <swarmId> <taskId> <fromAgentId> <toAgentId> --reason "..." [--json]
+  helix swarm graph <swarmId> [--json]
+  helix swarm consensus <swarmId> [--json]
+  helix swarm explain <swarmId> [--json]
+  helix federation doctor [--json]
+  helix federation nodes [--json]
+  helix federation node register --name <name> --endpoint <url> --role <role> --capabilities <a,b> [--json]
+  helix federation node drain <nodeId> [--json]
+  helix federation node remove <nodeId> [--json]
+  helix federation status [--json]
+  helix federation metrics [--json]
+  helix federation dispatch <taskId> [--capabilities <a,b>] [--local|--remote] [--json]
+  helix federation task dispatch <taskId> [--capabilities <a,b>] [--remote] [--json]
+  helix federation task cancel <taskId> [--json]
+  helix federation task retry <taskId> [--json]
+  helix federation runtime <start|stop|status> [--json]
+  helix federation outbox [status|retry] [--json]
+  helix federation deadletters [--json]
+  helix federation trace <taskId> [--json]
+  helix federation leases [--json]
+  helix mcp serve [--json]
+  helix mcp doctor [--json]
+  helix mcp tools [--json]
+  helix mcp resources [--json]
+  helix mcp prompts [--json]
+  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
 }
 
 async function main(): Promise<void> {
@@ -60,6 +111,112 @@ async function main(): Promise<void> {
     const approval = action === 'approve' ? runtime.policy.approve(approvalId, 'cli-user') : runtime.policy.deny(approvalId, 'cli-user');
     await runtime.events.append({ type: `approval.${approval.status}`, executionId: approval.executionId, agentId: approval.requestedBy, payload: approval });
     return print(approval);
+  }
+  if (command === 'memory') {
+    const action = args[1];
+    const context = { subject: process.env.HELIX_SUBJECT ?? 'cli-user' };
+    if (action === 'search') { const query = args.slice(2).filter((arg) => arg !== '--json').join(' ').trim(); if (!query) throw new Error('Usage: helix memory search "<query>"'); return print(await runtime.searchMemory({ query, limit: 20, context })); }
+    if (action === 'list') return print(await runtime.memory.listEntries(context));
+    if (action === 'inspect') { if (!args[2]) throw new Error('Usage: helix memory inspect <id>'); return print(await runtime.getMemory(args[2], context)); }
+    if (action === 'stats') return print({ stats: await runtime.memoryStats(context), cacheEntries: runtime.memoryCacheSize(), backend: runtime.memory.constructor.name });
+    if (action === 'compact') return print({ result: await runtime.compactMemory({ mergePatterns: true, removeExpiredLegacy: args.includes('--expired'), vacuum: args.includes('--vacuum') }), cacheEntries: runtime.memoryCacheSize() });
+    throw new Error('Usage: helix memory <search|list|inspect|stats|compact>');
+  }
+  if (command === 'learning') {
+    const action = args[1];
+    if (action === 'agent') { if (!args[2]) throw new Error('Usage: helix learning agent <agentId>'); return print(await runtime.agentExperience(args[2])); }
+    if (action === 'hints') { const task = args.slice(2).filter((arg) => arg !== '--json').join(' ').trim(); if (!task) throw new Error('Usage: helix learning hints "<task>"'); return print(await runtime.learningHints(task, ['analysis'], { subject: process.env.HELIX_SUBJECT ?? 'cli-user' })); }
+    if (action === 'flush') { await runtime.flushLearning(); return print({ pendingWrites: runtime.learning.pendingWrites }); }
+    throw new Error('Usage: helix learning <agent|hints|flush>');
+  }
+  if (command === 'goal') {
+    const orchestrator = runtime.createOrchestrator({ subject: process.env.HELIX_SUBJECT ?? 'cli-user' });
+    const action = args[1];
+    if (action === 'create') { const title = args.slice(2).filter((arg, index) => arg !== '--description' && arg !== '--json' && !args.slice(2, index + 2).includes('--description')).join(' ').trim(); const descriptionIndex = args.indexOf('--description'); const description = descriptionIndex >= 0 ? args[descriptionIndex + 1] : undefined; if (!title) throw new Error('Usage: helix goal create "<title>" [--description "..."]'); return print(await orchestrator.createGoal({ title, ...(typeof description === 'string' ? { description } : {}) })); }
+    if (action === 'analyze') { if (!args[2]) throw new Error('Usage: helix goal analyze <goalId>'); return print(await orchestrator.analyzeGoal(args[2])); }
+    throw new Error('Usage: helix goal <create|analyze>');
+  }
+  if (command === 'plan') {
+    const orchestrator = runtime.createOrchestrator({ subject: process.env.HELIX_SUBJECT ?? 'cli-user' }); const action = args[1]; const idValue = args[2];
+    if (!idValue || !['create', 'validate', 'show'].includes(action ?? '')) throw new Error('Usage: helix plan <create|validate|show> <id>');
+    if (action === 'create') return print(await orchestrator.createPlan(idValue));
+    if (action === 'validate') return print(await orchestrator.validatePlan(idValue));
+    const plan = orchestrator.plans.get(idValue); if (!plan) throw new Error(`Unknown plan: ${idValue}`); return print(plan);
+  }
+  if (command === 'orchestrate') {
+    const orchestrator = runtime.createOrchestrator({ subject: process.env.HELIX_SUBJECT ?? 'cli-user' }); const action = args[1];
+    if (action === 'status' || action === 'cancel') { const orchestrationId = args[2]; if (!orchestrationId) throw new Error(`Usage: helix orchestrate ${action} <orchestrationId>`); return print(action === 'status' ? await orchestrator.status(orchestrationId) : await orchestrator.cancel(orchestrationId)); }
+    const titleIndex = args.indexOf('--title'); const descriptionIndex = args.indexOf('--description'); const approvalIndex = args.indexOf('--approved-by'); const title = titleIndex >= 0 ? args[titleIndex + 1] : args.slice(1).filter((arg) => !arg.startsWith('--')).join(' '); const description = descriptionIndex >= 0 ? args[descriptionIndex + 1] : title; const approvedBy = approvalIndex >= 0 ? args[approvalIndex + 1] : undefined; if (!title) throw new Error('Usage: helix orchestrate --title "..." --description "..."'); return print(await orchestrator.run({ title, ...(typeof description === 'string' ? { description } : {}) }, typeof approvedBy === 'string' ? { approvedBy } : undefined));
+  }
+  if (command === 'swarm') {
+    const orchestrator = runtime.createOrchestrator({ subject: process.env.HELIX_SUBJECT ?? 'cli-user' });
+    const action = args[1];
+    if (action === 'create') { const goalText = option('--goal') ?? args.slice(2).filter((arg) => !arg.startsWith('--')).join(' ').trim(); if (!goalText) throw new Error('Usage: helix swarm create --goal "..."'); const goal = await orchestrator.createGoal({ title: option('--name') ?? goalText.slice(0, 80), description: goalText }); const swarm = await orchestrator.createSwarm({ name: option('--name') ?? 'helix-cli-swarm', goalId: goal.id, ...(option('--topology') ? { topology: option('--topology') as import('../../../packages/swarm/src/index.js').DynamicSwarmTopology } : {}), ...(option('--max-agents') ? { maxAgents: Number(option('--max-agents')) } : {}) }); return print({ goal, swarm }); }
+    const swarmId = args[2]; if (!swarmId) throw new Error('Usage: helix swarm <status|members|scale|rebalance|delegate|handoff|graph|consensus|explain> <swarmId>');
+    if (action === 'status') return print(orchestrator.swarmStatus(swarmId));
+    if (action === 'members') return print({ swarmId, members: orchestrator.swarmStatus(swarmId).members });
+    if (action === 'scale') { const count = Number(args[3]); if (!Number.isInteger(count)) throw new Error('Usage: helix swarm scale <swarmId> <count>'); return print(await orchestrator.scaleSwarm(swarmId, count)); }
+    if (action === 'rebalance') return print(await orchestrator.rebalanceSwarm(swarmId, option('--reason')));
+    if (action === 'delegate') { const taskId = args[3]; const capability = args[4]; if (!taskId || !capability) throw new Error('Usage: helix swarm delegate <swarmId> <taskId> <capability>'); return print(await orchestrator.delegateToSwarm(swarmId, { id: taskId, title: taskId, requiredCapabilities: [capability], dependencies: [], parallelizable: true }, option('--target') as import('../../../packages/core/src/index.js').AgentId | import('../../../packages/swarm/src/index.js').SwarmRole | 'swarm' ?? 'swarm')); }
+    if (action === 'handoff') { const taskId = args[3]; const fromAgentId = args[4]; const toAgentId = args[5]; const reason = option('--reason'); if (!taskId || !fromAgentId || !toAgentId || !reason) throw new Error('Usage: helix swarm handoff <swarmId> <taskId> <fromAgentId> <toAgentId> --reason "..."'); return print(await orchestrator.handoffInSwarm(swarmId, taskId, fromAgentId, toAgentId, reason)); }
+    if (action === 'graph') return print(orchestrator.swarmCollaboration(swarmId));
+    if (action === 'consensus') return print({ swarmId, message: 'Provide votes through the SDK or governed MCP surface.' });
+    if (action === 'explain') return print(orchestrator.explainSwarm(swarmId));
+    throw new Error('Usage: helix swarm <create|status|members|scale|rebalance|delegate|handoff|graph|consensus|explain>');
+  }
+  if (command === 'federation') {
+    const action = args[1] ?? 'doctor';
+    if (action === 'doctor') return print({ localNodeId: runtime.federation.localNodeId, status: runtime.federation.status(), runtime: runtime.federationRuntimeStatus(), deterministic: true, remoteExecution: 'requires injected signer/verifier and transport' });
+    if (action === 'runtime') { const runtimeAction = args[2] ?? 'status'; if (runtimeAction === 'start') return print(await runtime.startFederationRuntime()); if (runtimeAction === 'stop') return print(await runtime.stopFederationRuntime()); if (runtimeAction === 'status') return print(runtime.federationRuntimeStatus()); throw new Error('Usage: helix federation runtime <start|stop|status>'); }
+    if (action === 'task') { const taskAction = args[2]; const taskId = args[3]; if (!taskAction || !taskId) throw new Error('Usage: helix federation task <dispatch|cancel|retry> <taskId>'); if (taskAction === 'cancel') return print(await runtime.federation.cancel(taskId)); if (taskAction === 'retry') return print(await runtime.federation.retry(taskId)); if (taskAction === 'dispatch') { const capabilities = (option('--capabilities') ?? 'analysis').split(',').map((value) => value.trim()).filter(Boolean); const remote = args.includes('--remote'); return print(await runtime.federation.dispatch({ taskId, requiredCapabilities: capabilities, locality: remote ? 'remote' : 'any', securityContext: { subject: process.env.HELIX_SUBJECT ?? 'cli-user', permissions: remote ? ['federation:dispatch'] : ['federation:local'], trustLevel: remote ? 'TRUSTED' : 'ADMIN' }, authorizationContext: { subject: process.env.HELIX_SUBJECT ?? 'cli-user' } })); } throw new Error('Usage: helix federation task <dispatch|cancel|retry> <taskId>'); }
+    if (action === 'outbox') { const outboxAction = args[2] ?? 'status'; if (outboxAction === 'status') return print({ ...runtime.federation.outboxStatus(), records: runtime.federation.outboxRecords() }); if (outboxAction === 'retry') return print({ delivered: await runtime.federation.retryOutbox(), ...runtime.federation.outboxStatus() }); throw new Error('Usage: helix federation outbox <status|retry>'); }
+    if (action === 'deadletters') return print({ deadLetters: runtime.federation.deadLetters() });
+    if (action === 'trace') { const taskId = args[2]; if (!taskId) throw new Error('Usage: helix federation trace <taskId>'); return print({ taskId, events: (await runtime.events.read((event) => event.taskId === taskId || event.correlationId === taskId)).slice(-100) }); }
+    if (action === 'nodes') return print({ nodes: runtime.federation.listNodes() });
+    if (action === 'status') return print(runtime.federation.status());
+    if (action === 'metrics') return print(runtime.federation.metrics());
+    if (action === 'leases') return print({ leases: runtime.federation.listLeases() });
+    if (action === 'node' && args[2] === 'register') { const name = option('--name'); const endpoint = option('--endpoint'); const role = option('--role'); const capabilities = option('--capabilities'); if (!name || !endpoint || !role || !capabilities) throw new Error('Usage: helix federation node register --name <name> --endpoint <url> --role <role> --capabilities <a,b>'); return print(runtime.federation.registerNode({ name, endpoint, role: role as import('../../../packages/federation/src/index.js').FederationNodeRole, capabilities: capabilities.split(',').map((value) => value.trim()).filter(Boolean), ...(option('--trust') ? { trustLevel: option('--trust') as import('../../../packages/federation/src/index.js').FederationTrustLevel } : {}) })); }
+    if (action === 'node' && (args[2] === 'drain' || args[2] === 'remove')) { const nodeId = args[3]; if (!nodeId) throw new Error(`Usage: helix federation node ${args[2]} <nodeId>`); return print(args[2] === 'drain' ? runtime.federation.drainNode(nodeId) : runtime.federation.removeNode(nodeId)); }
+    if (action === 'dispatch') { const taskId = args[2]; if (!taskId) throw new Error('Usage: helix federation dispatch <taskId>'); const capabilities = (option('--capabilities') ?? 'analysis').split(',').map((value) => value.trim()).filter(Boolean); const locality = args.includes('--local') ? 'local' : args.includes('--remote') ? 'remote' : 'any'; return print(await runtime.federation.dispatch({ taskId, requiredCapabilities: capabilities, locality, securityContext: { subject: process.env.HELIX_SUBJECT ?? 'cli-user', permissions: args.includes('--remote') ? ['federation:dispatch'] : ['federation:local'], trustLevel: args.includes('--remote') ? 'TRUSTED' : 'ADMIN' }, authorizationContext: { subject: process.env.HELIX_SUBJECT ?? 'cli-user' } })); }
+    throw new Error('Usage: helix federation <doctor|nodes|node|status|metrics|dispatch|leases>');
+  }
+  if (command === 'mcp') {
+    const mcp = new HelixMcpServer(runtime, { actorRoles: { 'mcp-user': 'viewer', 'mcp-operator': 'operator', 'mcp-admin': 'admin' } });
+    const action = args[1] ?? 'doctor';
+    if (action === 'tools') return print({ count: mcp.registry.count(), tools: await mcp.listTools(), familyCounts: MCP_TOOL_FAMILY_COUNTS });
+    if (action === 'resources') return print({ resources: mcp.resources });
+    if (action === 'prompts') return print({ prompts: mcp.prompts });
+    if (action === 'doctor') return print({ server: 'helix-m15', sdk: 'official @modelcontextprotocol/sdk', tools: mcp.registry.count(), resources: mcp.resources.length, prompts: mcp.prompts.length, transports: ['stdio', 'streamable-http'], familyCounts: MCP_TOOL_FAMILY_COUNTS });
+    if (action === 'serve') return mcp.connectStdio();
+    throw new Error('Usage: helix mcp <serve|doctor|tools|resources|prompts>');
+  }
+  if (command === 'sandbox') {
+    const action = args[1];
+    if (action === 'doctor') return print({ local: { available: true, networkDefault: 'none', isolation: 'best-effort' }, docker: { available: await dockerAvailable(), requiredFlags: ['--read-only', '--cap-drop ALL', '--security-opt no-new-privileges', '--pids-limit', '--memory', '--cpus', '--network none'] } });
+    if (action === 'status') return print({ sandboxes: runtime.sandbox.list() });
+    if (action === 'destroy') { if (!args[2]) throw new Error('Usage: helix sandbox destroy <id>'); return print(await runtime.sandbox.destroy(args[2])); }
+    if (action === 'run') {
+      const separator = args.indexOf('--');
+      if (separator < 0 || !args[separator + 1]) throw new Error('Usage: helix sandbox run [options] -- <command> [args...]');
+      const commandName = args[separator + 1]!;
+      const commandArgs = args.slice(separator + 2);
+      const workspace = process.env.HELIX_SANDBOX_WORKSPACE ?? process.cwd();
+      const timeoutText = args[args.indexOf('--timeout') + 1] ?? '30s';
+      const timeoutMatch = timeoutText.match(/^(\d+)(ms|s|m)$/);
+      if (!timeoutMatch) throw new Error('--timeout must use ms, s, or m');
+      const timeoutUnits = Number(timeoutMatch[1]);
+      const timeoutMs = timeoutMatch[2] === 'm' ? timeoutUnits * 60_000 : timeoutMatch[2] === 's' ? timeoutUnits * 1_000 : timeoutUnits;
+      const network = args[args.indexOf('--network') + 1] ?? 'none';
+      if (!['none', 'host', 'bridge', 'custom'].includes(network)) throw new Error('--network must be none, host, bridge, or custom');
+      const memoryLimitMb = Number(args[args.indexOf('--memory') + 1] ?? 512);
+      if (!Number.isFinite(memoryLimitMb) || memoryLimitMb <= 0) throw new Error('--memory must be positive');
+      const sandboxPolicy = { ...defaultSandboxPolicy(workspace), allowedExecutables: [commandName], timeoutMs, memoryLimitMb, networkMode: network as 'none' | 'host' | 'bridge' | 'custom', allowNetwork: network !== 'none' };
+      const created = await runtime.sandbox.create({ policy: sandboxPolicy, backend: args.includes('--docker') ? 'docker' : 'local' });
+      try { await runtime.sandbox.start(created.sandboxId); return print(await runtime.sandbox.exec(created.sandboxId, { command: commandName, args: commandArgs, cwd: '.', env: {} })); }
+      finally { await runtime.sandbox.destroy(created.sandboxId); }
+    }
+    throw new Error('Usage: helix sandbox <doctor|run|status|destroy>');
   }
   if (command === 'verify') return print({ ok: true, sequence: runtime.events.lastSequence, provider: runtime.provider.name, dataDirectory });
   if (command === 'recover') return print({ recovered: await runtime.recover(), sequence: runtime.events.lastSequence });

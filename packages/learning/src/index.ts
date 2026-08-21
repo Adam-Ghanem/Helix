@@ -55,3 +55,6 @@ export class LearningEngine {
     return pattern;
   }
 }
+
+export * from './intelligence.js';
+export * from './queue.js';
