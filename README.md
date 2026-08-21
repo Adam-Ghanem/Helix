@@ -6,9 +6,9 @@ Helix is an autonomous multi-agent operating system and orchestration runtime. T
 
 ## What is implemented in v0.1
 
-This repository contains a runnable vertical slice rather than a non-functional mock. It includes an append-only durable event store with replay and snapshots, idempotent event handling, a validated task-DAG engine, pluggable routing strategies, policy evaluation with approval gates, resource budgets, a lease-based local scheduler, structured cognition metadata, agent health and reputation tracking, a provider-neutral runtime, lifecycle controls for pause/resume/cancel/retry/checkpoint/recovery, a bounded and optionally authenticated HTTP API, a JSON-capable CLI, a TypeScript SDK, a dashboard shell, and unit/integration tests.
+This repository contains a runnable vertical slice rather than a non-functional mock. It includes an append-only durable event store with replay and snapshots, idempotent event handling, a validated task-DAG engine, pluggable routing strategies, policy evaluation with approval gates, resource budgets, a lease-based local scheduler, structured cognition metadata, agent health and reputation tracking, a provider-neutral runtime, lifecycle controls for pause/resume/cancel/retry/checkpoint/recovery, a policy-backed local and Docker execution sandbox with audit logging, a bounded and optionally authenticated HTTP API, a JSON-capable CLI, a TypeScript SDK, a dashboard shell, and unit/integration tests.
 
-The default runtime uses a local JSONL event log so it can run without Docker or an external database. The persistence interfaces are intentionally provider-neutral; PostgreSQL, Redis, vector databases, graph databases, MCP transports, and federated nodes are declared as extension points and are not represented as complete implementations in this release.
+The default runtime uses a local JSONL event log so it can run without Docker or an external database. The persistence interfaces are intentionally provider-neutral; PostgreSQL, Redis, vector databases, graph databases, MCP transports, and federated nodes are declared as extension points and are not represented as complete implementations in this release. Sandbox execution is now available through a real local backend and an optional Docker backend; local mode provides process and policy controls but is not equivalent to container isolation.
 
 ## Quick start
 
@@ -50,7 +50,7 @@ To use a real OpenAI-compatible provider, set `HELIX_MODEL_API_URL`, `HELIX_MODE
 | `packages/observability` | Correlated spans, metrics, and structured logs | Implemented |
 | `packages/evaluation` | Rule, schema, test, human, and non-authoritative LLM-judge evaluation contracts | Implemented |
 | `packages/learning` | Trajectory evidence and reusable strategy/tool patterns | Implemented |
-| `packages/security` / `packages/sandbox` | Traversal-safe paths, command allowlists, environment filtering, timeout controls | Implemented controls; OS isolation boundary remains |
+| `packages/security` / `packages/sandbox` | RBAC, secret metadata, canonical paths, command allowlists, environment filtering, local process controls, Docker isolation, lifecycle management, and audit log | M8 implemented; deployment hardening and Docker daemon policy remain |
 | `packages/plugins` / `packages/providers` | Plugin trust and provider/model capability discovery | Implemented foundations |
 | `packages/federation` | Signed messages, replay protection, node registry, heartbeat | Implemented foundation |
 | `packages/sdk` | TypeScript client for execution, lifecycle, memory, telemetry, approvals | Implemented |
@@ -72,6 +72,17 @@ pnpm build
 pnpm test
 ```
 
+Sandbox controls are available through the CLI:
+
+```bash
+helix sandbox doctor --json
+helix sandbox run --timeout 10s --memory 512 --network none -- node script.js
+helix sandbox status --json
+helix sandbox destroy <sandbox-id> --json
+```
+
+The API exposes `GET /api/v1/sandboxes`, `GET /api/v1/sandboxes/:id`, and `POST /api/v1/sandboxes/:id/destroy`. Execution creation can include a typed `sandbox` request. Docker mode defaults to a read-only root, non-root user, dropped capabilities, no network, workspace-only read/write mount, PID/memory/CPU limits, and deterministic cleanup. The local backend explicitly reports unsupported kernel-level isolation limits.
+
 Lifecycle controls are available through the CLI and API:
 
 ```bash
@@ -84,7 +95,7 @@ helix execution <execution-id> checkpoint
 
 The runtime persists lifecycle events and can rehydrate completed executions from the event log. `helix recover` is planned as a daemon command; the runtime recovery API is currently exposed through the SDK and application layer.
 
-Measured benchmark output is written by `node benchmarks/runtime.mjs` or `pnpm benchmark` and is never hard-coded into documentation. The golden flow is available through `pnpm golden-demo`.
+Measured benchmark output is written by `node benchmarks/runtime.mjs` or `pnpm benchmark` and is never hard-coded into documentation. The golden flow is available through `pnpm golden-demo`, and the sandbox flow is available through `pnpm sandbox-demo`. See [`docs/milestone-8-sandbox.md`](docs/milestone-8-sandbox.md) for backend guarantees and deployment limitations.
 
 ## License
 
