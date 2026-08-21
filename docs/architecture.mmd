@@ -43,6 +43,17 @@ Kernel/container controls]
   Execution --> Audit[SandboxAuditLog]
   Audit --> Events
   Runtime --> Knowledge[Local Knowledge Graph]
+  Runtime --> MCP[M11 MCP Server]
+  MCP --> Registry[176 Typed Tool Registry]
+  Registry --> Families[20 Capability Families]
+  MCP --> Resources[8 Protected Resources]
+  MCP --> Prompts[6 Policy-aware Prompts]
+  MCP --> Auth[Actor Authorization + Rate Limits]
+  Auth --> Policy
+  Registry --> McpAudit[Sanitized MCP Audit Log]
+  McpAudit --> Events
+  MCP --> Stdio[Official SDK Stdio Transport]
+  MCP --> HTTP[Official SDK Streamable HTTP]
   Policy -. guarded boundary .-> Tools[Tool / MCP adapters]
   Policy -. plugin permissions .-> Plugins[Trusted Plugin Registry]
   Provider --> Models[Provider / Model Discovery]

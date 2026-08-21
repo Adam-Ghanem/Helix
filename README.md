@@ -137,6 +137,23 @@ pnpm memory-benchmark
 
 The benchmark uses 100 agents, 1,000 tasks, and 10,000 seeded memories. It reports routing latency, memory lookup latency with p50/p95/p99, write latency with p50/p95/p99, throughput, task completion, CPU, heap delta, and measured deltas. The benchmark must be treated as a local deterministic measurement rather than a production capacity promise.
 
+## M11 full MCP ecosystem
+
+M11 adds an official `@modelcontextprotocol/sdk` adapter over existing Helix capabilities. The server registers **176 unique typed tools** across agents, tasks, scheduler, workers, swarm, memory, learning, sandbox, security, policy, providers, models, workflows, evaluation, federation, system, GitHub boundary, filesystem, browser boundary, and events families. Each tool has a unique name, Zod input schema, family, risk classification, permissions, deterministic error category, authorization check, rate-limit bucket, and sanitized audit record.
+
+The server also exposes eight protected resources and six policy-aware prompts. Supported transports are official SDK stdio and Streamable HTTP:
+
+```bash
+helix mcp doctor --json
+helix mcp tools --json
+helix mcp resources --json
+helix mcp prompts --json
+helix mcp serve
+pnpm mcp:serve:http
+```
+
+The Streamable HTTP endpoint binds to `http://127.0.0.1:8790/mcp` by default. Claude Code can register the local server with `claude mcp add helix -- pnpm --dir /path/to/Helix mcp:serve`. The default MCP actor is read-only; writes, sandbox execution, administrative policy operations, and remote federation operations require stronger roles or remain denied by default. GitHub and browser families report an explicit unconfigured boundary rather than making hidden external calls. See [`docs/milestone-11-mcp.md`](docs/milestone-11-mcp.md) for the tool-family inventory, resources, prompts, transport details, benchmark, and limitations.
+
 ## License
 
 Apache-2.0. Independent implementation. Helix does not copy source code, branding, or proprietary architecture from other projects.
