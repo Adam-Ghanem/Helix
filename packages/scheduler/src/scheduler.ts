@@ -52,7 +52,7 @@ export class AgentScheduler {
     if (!task) throw new Error(`Unknown task: ${taskId}`);
     if (task.assignedAgentId) this.load.release(taskId);
     task.status = 'cancelled';
-    task.assignedAgentId = undefined;
+    delete task.assignedAgentId;
     this.queue.cancel(taskId);
     return structuredClone(task);
   }
@@ -117,7 +117,7 @@ export class AgentScheduler {
     const agentId = task.assignedAgentId;
     if (!agentId) throw new Error(`Task ${taskId} has no assigned agent`);
     this.load.release(taskId);
-    task.assignedAgentId = undefined;
+    delete task.assignedAgentId;
     task.completedAt = new Date().toISOString();
     if (success) {
       task.status = 'completed';
@@ -149,7 +149,7 @@ export class AgentScheduler {
       const task = this.tasks.get(reservation.taskId);
       this.load.release(reservation.taskId);
       if (!task || task.status === 'completed' || task.status === 'cancelled') continue;
-      task.assignedAgentId = undefined;
+      delete task.assignedAgentId;
       if (task.attempts < task.maxAttempts) {
         task.status = 'pending';
         this.queue.enqueue(task);
@@ -186,7 +186,7 @@ export class AgentScheduler {
     for (const reservation of this.load.recoverExpired(now)) {
       const task = this.tasks.get(reservation.taskId);
       if (!task || task.status === 'completed' || task.status === 'cancelled') continue;
-      task.assignedAgentId = undefined;
+      delete task.assignedAgentId;
       if (task.attempts < task.maxAttempts) {
         task.status = 'pending';
         this.queue.enqueue(task);
