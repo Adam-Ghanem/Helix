@@ -17,6 +17,7 @@ import { registerHelixMemoryTools } from '../../mcp/src/index.js';
 import { HelixOrchestrator, type OrchestratorOptions } from '../../intelligence/src/index.js';
 import { DynamicSwarmManager } from '../../swarm/src/index.js';
 import { FederationCoordinator, FederationNodeRuntime, HmacMessageSigner, HmacMessageVerifier, SqliteInboxStore, SqliteOutboxStore } from '../../federation/src/index.js';
+import { ControlPlaneController } from '../../control-plane/src/index.js';
 import type { FederationExecutionOutcome, FederationRuntimeOptions, FederationSecurityContext, FederationTimeoutKind } from '../../federation/src/index.js';
 
 export interface ProviderResult {
@@ -157,6 +158,7 @@ export class HelixRuntime {
   readonly swarms: DynamicSwarmManager;
   readonly federation: FederationCoordinator;
   readonly federationRuntime: FederationNodeRuntime;
+  readonly controlPlane: ControlPlaneController;
   readonly learningAsync: boolean;
   private readonly executions = new Map<string, ExecutionRecord>();
   private readonly graphs = new Map<string, TaskGraph>();
@@ -186,6 +188,7 @@ export class HelixRuntime {
     }
     this.federationRuntime = new FederationNodeRuntime({ runtime: this, coordinator: this.federation, ...(options.federationRuntime ?? {}) });
     this.learningAsync = options.learningAsync ?? true;
+    this.controlPlane = new ControlPlaneController(this);
   }
 
   async init(): Promise<void> {
@@ -242,6 +245,11 @@ export class HelixRuntime {
     if (execution && execution.status === 'running') { execution.status = 'cancelled'; execution.error = 'federated task cancelled'; execution.updatedAt = timestamp(); await this.events.append({ type: 'federated.execution.cancelled', executionId, taskId, payload: { taskId } }); }
     return undefined;
   }
+
+  listExecutions(): ExecutionRecord[] { return structuredClone([...this.executions.values()]); }
+  getExecution(executionId: string): ExecutionRecord { const execution = this.executions.get(executionId); if (!execution) throw new Error(`Unknown execution: ${executionId}`); return structuredClone(execution); }
+  listTasks(): TaskRecord[] { return structuredClone([...this.graphs.values()].flatMap((graph) => graph.all())); }
+  getTask(taskId: string): TaskRecord { for (const graph of this.graphs.values()) { try { return structuredClone(graph.get(taskId)); } catch { /* search next graph */ } } throw new Error(`Unknown task: ${taskId}`); }
 
   async execute(input: ExecutionInput): Promise<ExecutionRecord> {
     await this.init();
