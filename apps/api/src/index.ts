@@ -1,6 +1,8 @@
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
+import { parseNamespace } from '../../../packages/memory/src/index.js';
+import type { MemoryEntryInput, MemoryType, MemoryAccessContext, TaskOutcomeLearningInput } from '../../../packages/memory/src/index.js';
 
 const port = Number(process.env.HELIX_PORT ?? 8787);
 const host = process.env.HELIX_HOST ?? '127.0.0.1';
@@ -75,24 +77,36 @@ const server = createServer(async (request, response) => {
     if (url.pathname === '/api/v1/agents' && request.method === 'GET') return json(response, 200, { agents: runtime.agents.list() });
     if (url.pathname === '/api/v1/memory/search' && request.method === 'GET') {
       const query = url.searchParams.get('q') ?? '';
-      const namespace = url.searchParams.get('namespace') ?? 'default';
+      const namespaceText = url.searchParams.get('namespace');
       const subject = url.searchParams.get('subject') ?? 'api-user';
-      return json(response, 200, { hits: await runtime.recall({ query, namespace, subject, limit: Number(url.searchParams.get('limit') ?? 20) }) });
+      const context: MemoryAccessContext = { subject, ...(subject.startsWith('agent_') ? { agentId: subject } : {}) };
+      const hits = await runtime.searchMemory({ query, ...(namespaceText ? { namespace: parseNamespace(namespaceText) } : {}), limit: Number(url.searchParams.get('limit') ?? 20), context });
+      const legacyHits = await runtime.recall({ query, namespace: namespaceText ?? 'default', subject, limit: Number(url.searchParams.get('limit') ?? 20) });
+      return json(response, 200, { hits, legacyHits });
     }
     if (url.pathname === '/api/v1/memory' && request.method === 'POST') {
       const input = await body(request);
       if (typeof input.content !== 'string' || !input.content.trim()) return json(response, 400, { error: 'content is required' });
-      const record = await runtime.remember({
-        namespace: typeof input.namespace === 'string' ? input.namespace : 'default',
-        owner: typeof input.owner === 'string' ? input.owner : 'api-user',
-        content: input.content,
-        importance: typeof input.importance === 'number' ? Math.max(0, Math.min(1, input.importance)) : 0.5,
-        confidence: typeof input.confidence === 'number' ? Math.max(0, Math.min(1, input.confidence)) : 0.5,
-        source: typeof input.source === 'object' && input.source ? input.source as never : {},
-        ...(typeof input.expiresAt === 'string' ? { expiresAt: input.expiresAt } : {}),
-        allowedSubjects: Array.isArray(input.allowedSubjects) ? input.allowedSubjects.filter((value): value is string => typeof value === 'string') : ['api-user'],
-      });
+      if (typeof input.type === 'string' && isMemoryType(input.type) && isRecord(input.provenance) && isRecord(input.accessPolicy)) {
+        const namespace = parseNamespace(typeof input.namespace === 'string' ? input.namespace : 'global');
+        const owner = typeof input.owner === 'string' ? input.owner : 'api-user';
+        const entryInput: MemoryEntryInput = { namespace, type: input.type, content: input.content, metadata: primitiveMetadata(input.metadata), source: typeof input.source === 'string' ? input.source : 'api', ...(typeof input.agentId === 'string' ? { agentId: input.agentId } : {}), ...(typeof input.swarmId === 'string' ? { swarmId: input.swarmId } : {}), ...(typeof input.taskId === 'string' ? { taskId: input.taskId } : {}), ...(typeof input.sessionId === 'string' ? { sessionId: input.sessionId } : {}), confidence: typeof input.confidence === 'number' ? input.confidence : 0.5, tags: Array.isArray(input.tags) ? input.tags.filter((value): value is string => typeof value === 'string') : [], provenance: parseProvenance(input.provenance), accessPolicy: { visibility: input.accessPolicy.visibility === 'private' || input.accessPolicy.visibility === 'shared' || input.accessPolicy.visibility === 'public' ? input.accessPolicy.visibility : 'private', allowedSubjects: Array.isArray(input.accessPolicy.allowedSubjects) ? input.accessPolicy.allowedSubjects.filter((value): value is string => typeof value === 'string') : [owner], allowedSwarmIds: Array.isArray(input.accessPolicy.allowedSwarmIds) ? input.accessPolicy.allowedSwarmIds.filter((value): value is string => typeof value === 'string') : [], owner }, };
+        return json(response, 201, await runtime.rememberEntry(entryInput, { subject: owner }));
+      }
+      const record = await runtime.remember({ namespace: typeof input.namespace === 'string' ? input.namespace : 'default', owner: typeof input.owner === 'string' ? input.owner : 'api-user', content: input.content, importance: typeof input.importance === 'number' ? Math.max(0, Math.min(1, input.importance)) : 0.5, confidence: typeof input.confidence === 'number' ? Math.max(0, Math.min(1, input.confidence)) : 0.5, source: isRecord(input.source) ? input.source : {}, ...(typeof input.expiresAt === 'string' ? { expiresAt: input.expiresAt } : {}), allowedSubjects: Array.isArray(input.allowedSubjects) ? input.allowedSubjects.filter((value): value is string => typeof value === 'string') : ['api-user'] });
       return json(response, 201, record);
+    }
+    const memoryMatch = url.pathname.match(/^\/api\/v1\/memory\/([^/]+)$/);
+    if (memoryMatch && request.method === 'GET') return json(response, 200, await runtime.getMemory(memoryMatch[1]!, { subject: request.headers['x-helix-subject']?.toString() ?? 'api-user' }));
+    if (memoryMatch && request.method === 'DELETE') { await runtime.deleteMemory(memoryMatch[1]!, { subject: request.headers['x-helix-subject']?.toString() ?? 'api-user' }); return json(response, 204, { deleted: true }); }
+    if (url.pathname === '/api/v1/learning/hints' && request.method === 'GET') return json(response, 200, await runtime.learningHints(url.searchParams.get('task') ?? '', (url.searchParams.get('capabilities') ?? '').split(',').map((value) => value.trim()).filter(Boolean), { subject: request.headers['x-helix-subject']?.toString() ?? 'api-user' }));
+    const experienceMatch = url.pathname.match(/^\/api\/v1\/learning\/agent\/([^/]+)$/);
+    if (experienceMatch && request.method === 'GET') return json(response, 200, await runtime.agentExperience(experienceMatch[1]!));
+    if (url.pathname === '/api/v1/learning/outcome' && request.method === 'POST') {
+      const input = await body(request);
+      if (typeof input.executionId !== 'string' || typeof input.taskId !== 'string' || typeof input.taskType !== 'string' || typeof input.agentId !== 'string' || typeof input.success !== 'boolean') return json(response, 400, { error: 'executionId, taskId, taskType, agentId, and success are required' });
+      const outcome: TaskOutcomeLearningInput = { executionId: input.executionId, taskId: input.taskId, taskType: input.taskType, agentId: input.agentId, capabilities: Array.isArray(input.capabilities) ? input.capabilities.filter((value): value is string => typeof value === 'string') : [], success: input.success, quality: typeof input.quality === 'number' ? input.quality : input.success ? 0.75 : 0, executionTimeMs: typeof input.executionTimeMs === 'number' ? input.executionTimeMs : 0, attempts: typeof input.attempts === 'number' ? input.attempts : 1, ...(input.output !== undefined ? { output: input.output } : {}), ...(typeof input.error === 'string' ? { error: input.error } : {}) };
+      return json(response, 201, { memories: await runtime.recordLearningOutcome(outcome) });
     }
     if (url.pathname === '/api/v1/telemetry' && request.method === 'GET') return json(response, 200, runtime.telemetrySnapshot());
     if (url.pathname === '/api/v1/approvals' && request.method === 'GET') return json(response, 200, { approvals: runtime.policy.listApprovals(statusFilter(url.searchParams.get('status'))) });
@@ -147,5 +161,10 @@ server.listen(port, host, () => console.log(`Helix API listening on http://${hos
 
 process.on('SIGTERM', () => server.close());
 process.on('SIGINT', () => server.close());
+
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
+function primitiveMetadata(value: unknown): Record<string, string | number | boolean | null> { if (!isRecord(value)) return {}; const output: Record<string, string | number | boolean | null> = {}; for (const [key, item] of Object.entries(value)) if (typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean' || item === null) output[key] = item; return output; }
+function isMemoryType(value: string): value is MemoryType { return ['fact', 'task', 'solution', 'pattern', 'failure', 'decision', 'observation', 'agent-experience', 'workflow', 'routing-hint'].includes(value); }
+function parseProvenance(value: unknown): MemoryEntryInput['provenance'] { if (!isRecord(value) || typeof value.sourceType !== 'string' || typeof value.sourceId !== 'string' || typeof value.timestamp !== 'string' || typeof value.confidence !== 'number') throw new Error('provenance requires sourceType, sourceId, timestamp, and confidence'); return { sourceType: ['task-outcome', 'agent-observation', 'workflow', 'user', 'import', 'system'].includes(value.sourceType) ? value.sourceType as MemoryEntryInput['provenance']['sourceType'] : 'import', sourceId: value.sourceId, timestamp: value.timestamp, confidence: value.confidence, ...(typeof value.agentId === 'string' ? { agentId: value.agentId } : {}), ...(typeof value.swarmId === 'string' ? { swarmId: value.swarmId } : {}), ...(typeof value.taskId === 'string' ? { taskId: value.taskId } : {}), ...(typeof value.executionId === 'string' ? { executionId: value.executionId } : {}) }; }
 
 export { server, runtime };
