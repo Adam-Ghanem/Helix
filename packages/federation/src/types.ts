@@ -1,4 +1,4 @@
-import type { AgentId, TaskId } from '../../core/src/index.js';
+import type { AgentId, TaskId, SandboxExecutionRequest } from '../../core/src/index.js';
 
 export type FederationNodeRole = 'coordinator' | 'scheduler' | 'worker' | 'hybrid';
 export type FederationNodeStatus = 'joining' | 'healthy' | 'degraded' | 'draining' | 'offline' | 'removed';
@@ -46,7 +46,7 @@ export interface FederationNodeRegistryOptions {
 
 export type FederationMessageType =
   | 'task.submit' | 'task.accept' | 'task.reject' | 'task.started' | 'task.progress'
-  | 'task.completed' | 'task.failed' | 'task.cancel' | 'task.reassign'
+  | 'task.completed' | 'task.failed' | 'task.cancelled' | 'task.cancel' | 'task.reassign'
   | 'heartbeat' | 'node.join' | 'node.leave'
   | 'lease.acquire' | 'lease.renew' | 'lease.release';
 
@@ -58,6 +58,7 @@ export interface FederationSecurityContext {
 
 export interface FederationTaskPayload {
   taskId: TaskId | string;
+  attemptId?: string;
   correlationId: string;
   traceId: string;
   priority: number;
@@ -66,6 +67,7 @@ export interface FederationTaskPayload {
   authorizationContext: Record<string, string>;
   title?: string;
   input?: unknown;
+  sandbox?: SandboxExecutionRequest;
 }
 
 export interface FederationMessage<T = unknown> {
@@ -81,6 +83,9 @@ export interface FederationMessage<T = unknown> {
   schemaVersion: 1;
   expiresAt: string;
   nonce: string;
+  keyId?: string;
+  algorithm?: 'HMAC-SHA256' | 'ED25519' | 'MTLS';
+  idempotencyKey?: string;
 }
 
 export interface FederationRoutingTask {
@@ -92,8 +97,10 @@ export interface FederationRoutingTask {
   nodeId?: string;
   correlationId?: string;
   traceId?: string;
+  attemptId?: string;
   securityContext: FederationSecurityContext;
   authorizationContext: Record<string, string>;
+  sandbox?: SandboxExecutionRequest;
 }
 
 export interface FederationRoutingDecision {
@@ -132,6 +139,7 @@ export interface DistributedLeaseOptions {
 
 export interface FederationTaskRecord {
   taskId: string;
+  attemptId: string;
   nodeId: string;
   local: boolean;
   status: 'queued' | 'accepted' | 'running' | 'completed' | 'failed' | 'reassigned' | 'cancelled';
@@ -144,6 +152,8 @@ export interface FederationTaskRecord {
   createdAt: string;
   updatedAt: string;
   error?: string;
+  output?: unknown;
+  timeout?: FederationTimeoutKind;
 }
 
 export interface FederationMetrics {
@@ -221,11 +231,122 @@ export interface FederatedSwarmResult<T = unknown> {
 
 export interface MessageSigner {
   sign(message: Omit<FederationMessage, 'signature'>): string;
+  readonly keyId?: string;
+  readonly algorithm?: FederationMessage['algorithm'];
 }
 
 export interface MessageVerifier {
   verify(message: FederationMessage): boolean;
 }
+
+export interface KeyProvider {
+  active(): { keyId: string; secret: string; algorithm: 'HMAC-SHA256' };
+  get(keyId: string): { keyId: string; secret: string; algorithm: 'HMAC-SHA256' } | undefined;
+  previous(): Array<{ keyId: string; secret: string; algorithm: 'HMAC-SHA256' }>;
+}
+
+export interface PeerIdentity {
+  nodeId: string;
+  keyId: string;
+  algorithm: 'HMAC-SHA256' | 'ED25519' | 'MTLS';
+  trustLevel: FederationTrustLevel;
+  endpoint?: string;
+}
+
+export interface PeerAuthenticator {
+  authenticate(message: FederationMessage, peer: PeerIdentity): boolean;
+}
+
+export interface FederationRetryPolicy {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  jitterMs?: number;
+}
+
+export type OutboxStatus = 'pending' | 'sending' | 'sent' | 'dead-letter';
+export interface FederationOutboxRecord {
+  id: string;
+  messageId: string;
+  destination: string;
+  payload: FederationMessage;
+  attempts: number;
+  nextAttemptAt: number;
+  createdAt: string;
+  status: OutboxStatus;
+  lastError?: string;
+  idempotencyKey: string;
+}
+
+export type FederationOutboxInput = Pick<FederationOutboxRecord, 'messageId' | 'destination' | 'payload' | 'idempotencyKey'> & Partial<Pick<FederationOutboxRecord, 'id'>>;
+export interface OutboxStore {
+  enqueue(record: FederationOutboxInput): FederationOutboxRecord;
+  claim(limit?: number, now?: number): FederationOutboxRecord[];
+  ack(id: string): FederationOutboxRecord;
+  retry(id: string, error: string, nextAttemptAt: number): FederationOutboxRecord;
+  deadLetter(id: string, error: string): FederationOutboxRecord;
+  listPending(): FederationOutboxRecord[];
+  listDeadLetters(): FederationOutboxRecord[];
+  count(status?: OutboxStatus): number;
+}
+
+export type InboxMessageStatus = 'received' | 'processed' | 'failed';
+export interface InboxRecord {
+  messageId: string;
+  idempotencyKey: string;
+  receivedAt: string;
+  status: InboxMessageStatus;
+  attempts: number;
+  lastError?: string;
+}
+
+export interface InboxStore {
+  seen(messageId: string, idempotencyKey?: string): boolean;
+  markProcessed(messageId: string): InboxRecord;
+  markFailed(messageId: string, error: string): InboxRecord;
+  cleanup(before: number): number;
+  list(): InboxRecord[];
+}
+
+export type FederationNodeRuntimeState = 'created' | 'starting' | 'ready' | 'draining' | 'stopped' | 'failed';
+export type FederationTimeoutKind = 'EXECUTION_TIMEOUT' | 'NETWORK_TIMEOUT' | 'LEASE_TIMEOUT';
+export interface FederationExecutionOutcome {
+  taskId: string;
+  attemptId: string;
+  nodeId: string;
+  status: 'completed' | 'failed' | 'cancelled';
+  output?: unknown;
+  error?: string;
+  timeout?: FederationTimeoutKind;
+  startedAt: string;
+  completedAt: string;
+  provenance: { sourceNodeId?: string; agentId?: string; taskId: string; attemptId: string; timestamp: string };
+}
+
+export interface FederationNodeRuntimeStatus {
+  nodeId: string;
+  state: FederationNodeRuntimeState;
+  activeTasks: number;
+  acceptingTasks: boolean;
+  lastHeartbeat: string;
+  outboxPending: number;
+  deadLetters: number;
+}
+
+export interface FederationRuntimeOptions {
+  heartbeatIntervalMs?: number;
+  drainDeadlineMs?: number;
+  executionTimeoutMs?: number;
+}
+
+export interface FaultInjectionRule {
+  action: 'drop' | 'delay' | 'duplicate' | 'corrupt' | 'partition' | 'crash';
+  messageType?: FederationMessageType;
+  messageId?: string;
+  delayMs?: number;
+  remaining?: number;
+}
+
 
 export interface ReplayStore {
   has(messageId: string): boolean;

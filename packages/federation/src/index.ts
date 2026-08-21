@@ -3,11 +3,16 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 export * from './types.js';
 export * from './node-registry.js';
 export * from './messages.js';
+export * from './peer-auth.js';
 export * from './leases.js';
 export * from './transport.js';
+export * from './http-transport.js';
+export * from './faults.js';
 export * from './router.js';
 export * from './coordinator.js';
 export * from './worker.js';
+export * from './outbox.js';
+export * from './runtime.js';
 
 export interface LegacyFederationNode {
   id: string;
