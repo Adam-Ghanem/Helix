@@ -19,7 +19,14 @@ function print(value: unknown): void {
 }
 
 function help(): void {
-  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix sandbox doctor [--json]\n  helix sandbox run [--docker] [--network none] [--memory MB] [--timeout 10s] -- <command> [args...]\n  helix sandbox status [--json]\n  helix sandbox destroy <id> [--json]\n  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
+  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix sandbox doctor [--json]\n  helix sandbox run [--docker] [--network none] [--memory MB] [--timeout 10s] -- <command> [args...]\n  helix sandbox status [--json]\n  helix sandbox destroy <id> [--json]
+  helix memory search "<query>" [--json]
+  helix memory list [--json]
+  helix memory inspect <id> [--json]
+  helix memory stats [--json]
+  helix learning agent <agentId> [--json]
+  helix learning hints "<task>" [--json]
+  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
 }
 
 async function main(): Promise<void> {
@@ -61,6 +68,21 @@ async function main(): Promise<void> {
     const approval = action === 'approve' ? runtime.policy.approve(approvalId, 'cli-user') : runtime.policy.deny(approvalId, 'cli-user');
     await runtime.events.append({ type: `approval.${approval.status}`, executionId: approval.executionId, agentId: approval.requestedBy, payload: approval });
     return print(approval);
+  }
+  if (command === 'memory') {
+    const action = args[1];
+    const context = { subject: process.env.HELIX_SUBJECT ?? 'cli-user' };
+    if (action === 'search') { const query = args.slice(2).filter((arg) => arg !== '--json').join(' ').trim(); if (!query) throw new Error('Usage: helix memory search "<query>"'); return print(await runtime.searchMemory({ query, limit: 20, context })); }
+    if (action === 'list') return print(await runtime.memory.listEntries(context));
+    if (action === 'inspect') { if (!args[2]) throw new Error('Usage: helix memory inspect <id>'); return print(await runtime.getMemory(args[2], context)); }
+    if (action === 'stats') return print(await runtime.memoryStats(context));
+    throw new Error('Usage: helix memory <search|list|inspect|stats>');
+  }
+  if (command === 'learning') {
+    const action = args[1];
+    if (action === 'agent') { if (!args[2]) throw new Error('Usage: helix learning agent <agentId>'); return print(await runtime.agentExperience(args[2])); }
+    if (action === 'hints') { const task = args.slice(2).filter((arg) => arg !== '--json').join(' ').trim(); if (!task) throw new Error('Usage: helix learning hints "<task>"'); return print(await runtime.learningHints(task, ['analysis'], { subject: process.env.HELIX_SUBJECT ?? 'cli-user' })); }
+    throw new Error('Usage: helix learning <agent|hints>');
   }
   if (command === 'sandbox') {
     const action = args[1];
