@@ -179,10 +179,34 @@ export interface ApprovalRequest {
   decidedBy?: string;
 }
 
+export interface SandboxExecutionRequest {
+  enabled: boolean;
+  backend?: 'local' | 'docker';
+  policy?: {
+    allowedExecutables?: string[];
+    allowedPaths?: string[];
+    deniedPaths?: string[];
+    environmentAllowlist?: string[];
+    networkMode?: 'none' | 'host' | 'bridge' | 'custom';
+    timeoutMs?: number;
+    memoryLimitMb?: number;
+    cpuLimit?: number;
+    maxProcesses?: number;
+    readOnlyRoot?: boolean;
+    workspacePath?: string;
+    containerImage?: string;
+    user?: string;
+    allowNetwork?: boolean;
+    allowChildProcesses?: boolean;
+  };
+  command?: { command: string; args?: string[]; cwd?: string; env?: Record<string, string>; stdin?: string; timeoutMs?: number };
+}
+
 export interface ExecutionInput {
   goal: string;
   budget?: Partial<ResourceBudget>;
   metadata?: Record<string, unknown>;
+  sandbox?: SandboxExecutionRequest;
 }
 
 export const DEFAULT_BUDGET: ResourceBudget = {

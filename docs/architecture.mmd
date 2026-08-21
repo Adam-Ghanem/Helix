@@ -1,17 +1,99 @@
-flowchart TB
+flowchart TD
   User[Human / automation] --> API[Versioned HTTP API]
   User --> CLI[helix CLI]
   API --> Runtime[Helix Runtime]
   CLI --> Runtime
-  Runtime --> Router[Adaptive Router]
-  Runtime --> Planner[Validated Task DAG]
-  Runtime --> Scheduler[Lease Scheduler]
-  Runtime --> Agents[Agent Registry + Health]
-  Runtime --> Policy[Default-deny Policy + Approvals]
-  Runtime --> Provider[Provider Interface]
-  Runtime --> Events[Durable Event Store]
-  Events --> Replay[Replay + Snapshots]
-  Runtime --> Dashboard[Read-only Dashboard]
-  Policy -. guarded boundary .-> Tools[Tool / MCP adapters]
-  Events -. future adapter .-> Memory[Vector / graph memory]
-  Scheduler -. future federation .-> Nodes[Remote Helix nodes]
+
+  Runtime --> Goal[Goal model]
+  Goal --> Analysis[Deterministic goal analysis]
+  Analysis --> Decomposer[Bounded category-aware decomposition]
+  Decomposer --> IntelligencePlanner[Intelligence Planner]
+  IntelligencePlanner --> Plan[Typed Execution Plan]
+  Plan --> Validator[Plan Validator]
+  Validator -->|valid + authorized| Selector[Capability-first agent selector]
+  Validator -->|invalid or unauthorized| Reject[Typed rejection / approval required]
+
+  Selector --> SwarmManager[M13 DynamicSwarmManager]
+  SwarmManager --> Formation[Bounded team formation]
+  Formation --> Roles[Multi-role members]
+  Formation --> Topology[Adaptive topology rules]
+  Topology -->|parallelism| Parallel[Parallel / mesh]
+  Topology -->|dependency| Pipeline[Pipeline / hierarchical]
+  Topology -->|risk or failure| SecurityTopology[Coordinator + security review]
+  SwarmManager --> Coordinator[Deterministic coordinator]
+  Coordinator --> Delegation[Direct / role / capability / swarm delegation]
+  Delegation --> Scheduler[Existing Lease Scheduler + durable leases]
+  Delegation --> Handoff[Bounded handoff history + loop detection]
+  Handoff --> Delegation
+  SwarmManager --> Scale[Bounded scale up / scale down]
+  Scale --> Registry[Existing Agent Registry + capacity]
+  SwarmManager --> Health[SwarmHealthMonitor]
+  Health --> Rebalance[Deterministic rebalancing]
+  Rebalance --> Scheduler
+  Health --> Topology
+
+  Scheduler --> Workers[Existing workers / task execution]
+  Workers --> SandboxManager[Existing SandboxManager]
+  SandboxManager --> SandboxPolicy[Canonical paths + exec allowlist + env filter]
+  SandboxPolicy --> Local[LocalSandbox best-effort controls]
+  SandboxPolicy --> Docker[DockerSandbox kernel/container controls]
+  Local --> Execution[Bounded command execution]
+  Docker --> Execution
+  Execution --> StepEvidence[Sanitized step evidence]
+  StepEvidence --> Evaluator[Evidence-based evaluator]
+  Evaluator --> Aggregate[SwarmResultAggregator]
+  Aggregate --> Consensus[Application-level review consensus]
+  Consensus --> Complete[COMPLETED / result]
+  Evaluator -->|failure / timeout| Recovery[Bounded failure recovery]
+  Recovery -->|retry or handoff| Delegation
+  Recovery -->|replan when limits remain| Replanner[Bounded Intelligence Replanner]
+  Replanner --> Selector
+  Recovery -->|no alternative or limit reached| Failed[FAILED]
+
+  Runtime --> Cancel[Durable cancellation guard]
+  Cancel --> Cancelled[CANCELLED]
+
+  Analysis --> Recall[Advisory M10 memory recall]
+  Recall --> Cache[TTL/LRU MemoryCache]
+  Cache --> Search[Bounded hybrid search]
+  Search --> Indexes[SQLite indexes + FTS5 candidates]
+  Indexes --> Memory[SqliteMemoryStore]
+  Memory --> ACL[Namespace ACL + provenance + sanitization]
+  ACL --> Recall
+  SwarmManager --> SwarmMemory[swarm:<id> learning observations]
+  SwarmMemory --> Memory
+  Evaluator --> Learning[Persistent Learning Engine]
+  Learning --> Queue[Bounded async learning queue]
+  Queue --> Batch[Transactional batch persistence]
+  Batch --> Memory
+  Learning --> Bonus[Bounded learning signal <= 10%]
+  Bonus --> ExistingRouter[Existing AgentRouter]
+  Selector --> ExistingRouter
+  ExistingRouter --> Registry
+
+  StepEvidence --> Events[Durable event store]
+  SwarmManager --> Events
+  Events --> Replay[Replay + restart recovery evidence]
+  Runtime --> Telemetry[Traces + metrics + structured logs]
+
+  Runtime --> Policy[Default-deny Policy + RBAC + Approvals]
+  Policy -. guards .-> Validator
+  Policy -. guards .-> Delegation
+  Policy -. guards .-> Workers
+  Policy -. guards .-> SandboxManager
+  Runtime --> Provider[Provider interface]
+  Provider --> Models[Provider / model discovery]
+  Runtime --> Knowledge[Local knowledge graph]
+
+  Runtime --> MCP[M11/M12/M13 MCP Server]
+  MCP --> RegistryMCP[204 typed tool registry]
+  RegistryMCP --> Families[21 capability families]
+  MCP --> Resources[13 protected resources]
+  MCP --> Prompts[10 policy-aware prompts]
+  MCP --> Auth[Actor authorization + rate limits + audit]
+  Auth --> Policy
+  RegistryMCP --> McpAudit[Sanitized MCP audit log]
+  McpAudit --> Events
+  MCP --> Stdio[Official SDK stdio transport]
+  MCP --> HTTP[Official SDK Streamable HTTP]
+  Runtime --> Dashboard[Read-only dashboard]

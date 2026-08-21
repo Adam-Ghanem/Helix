@@ -48,3 +48,29 @@ export class McpGateway {
     if (parts.length < 3 || !this.servers.has(parts[1]!)) throw new Error(`MCP tool is not registered: ${toolName}`);
   }
 }
+
+
+export * from './m11.js';
+
+export interface HelixMemoryToolHandlers {
+  search(input: Record<string, unknown>): Promise<unknown>;
+  get(input: Record<string, unknown>): Promise<unknown>;
+  list(input: Record<string, unknown>): Promise<unknown>;
+  stats(input: Record<string, unknown>): Promise<unknown>;
+  recall(input: Record<string, unknown>): Promise<unknown>;
+  routingHints(input: Record<string, unknown>): Promise<unknown>;
+  agentExperience(input: Record<string, unknown>): Promise<unknown>;
+}
+
+export function registerHelixMemoryTools(registry: ToolRegistry, handlers: HelixMemoryToolHandlers): PublicToolDefinition[] {
+  const common = { risk: 'low' as const, source: 'builtin' as const, permissions: ['memory:read'] };
+  return [
+    registry.register({ ...common, name: 'helix.memory.search', description: 'Search authorized Helix memory using transparent hybrid ranking', inputSchema: { required: ['query'], properties: { query: 'string', subject: 'string' } }, handler: handlers.search }),
+    registry.register({ ...common, name: 'helix.memory.get', description: 'Read one authorized Helix memory entry', inputSchema: { required: ['id'], properties: { id: 'string', subject: 'string' } }, handler: handlers.get }),
+    registry.register({ ...common, name: 'helix.memory.list', description: 'List authorized Helix memory entries', inputSchema: { properties: { subject: 'string' } }, handler: handlers.list }),
+    registry.register({ ...common, name: 'helix.memory.stats', description: 'Report authorized Helix memory statistics', inputSchema: { properties: { subject: 'string' } }, handler: handlers.stats }),
+    registry.register({ ...common, name: 'helix.learning.recall', description: 'Recall historical learning evidence for a task', inputSchema: { required: ['query'], properties: { query: 'string', subject: 'string' } }, handler: handlers.recall }),
+    registry.register({ ...common, name: 'helix.learning.routingHints', description: 'Return bounded deterministic routing hints', inputSchema: { required: ['taskType'], properties: { taskType: 'string', capabilities: 'array', subject: 'string' } }, handler: handlers.routingHints }),
+    registry.register({ ...common, name: 'helix.learning.agentExperience', description: 'Return historical experience for an agent', inputSchema: { required: ['agentId'], properties: { agentId: 'string' } }, handler: handlers.agentExperience }),
+  ];
+}
