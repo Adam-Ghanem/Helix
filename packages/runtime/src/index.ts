@@ -16,6 +16,7 @@ import { ToolRegistry, PublicToolDefinition } from '../../tools/src/index.js';
 import { registerHelixMemoryTools } from '../../mcp/src/index.js';
 import { HelixOrchestrator, type OrchestratorOptions } from '../../intelligence/src/index.js';
 import { DynamicSwarmManager } from '../../swarm/src/index.js';
+import { FederationCoordinator } from '../../federation/src/index.js';
 
 export interface ProviderResult {
   output: unknown;
@@ -99,6 +100,7 @@ export interface RuntimeOptions {
   sandboxManager?: SandboxManager;
   learning?: PersistentLearningEngine;
   learningAsync?: boolean;
+  federation?: FederationCoordinator;
 }
 
 export interface ExecutionView {
@@ -119,6 +121,7 @@ export class HelixRuntime {
   readonly sandbox: SandboxManager;
   readonly learning: PersistentLearningEngine;
   readonly swarms: DynamicSwarmManager;
+  readonly federation: FederationCoordinator;
   readonly learningAsync: boolean;
   private readonly executions = new Map<string, ExecutionRecord>();
   private readonly graphs = new Map<string, TaskGraph>();
@@ -136,6 +139,8 @@ export class HelixRuntime {
     this.sandbox = options.sandboxManager ?? new SandboxManager({ auditFile: defaultAuditFile(options.dataDirectory) });
     this.learning = options.learning ?? new PersistentLearningEngine(this.memory);
     this.swarms = new DynamicSwarmManager({ agents: this.agents, router: this.router, scheduler: this.scheduler, memory: this.memory, subject: 'runtime', eventSink: async (event) => { await this.events.append({ type: event.type, payload: { swarmId: event.swarmId, ...event.payload } }); } });
+    const localCapabilities = [...new Set(this.agents.list().flatMap((agent) => agent.capabilities))];
+    this.federation = options.federation ?? new FederationCoordinator({ localNode: { name: 'helix-local', endpoint: 'in-memory://local', role: 'hybrid', capabilities: localCapabilities, status: 'healthy', trustLevel: 'ADMIN', metadata: { runtime: 'helix' } }, eventSink: async (event) => { await this.events.append({ type: event.type, payload: event.payload }); } });
     this.learningAsync = options.learningAsync ?? true;
   }
 
