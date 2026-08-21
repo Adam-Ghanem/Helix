@@ -105,10 +105,11 @@ export class AgentScheduler {
 
   start(taskId: TaskId): SchedulerTask {
     const task = this.require(taskId);
-    if (task.status !== 'assigned') throw new Error(`Task ${taskId} is not assigned`);
+    const agentId = task.assignedAgentId;
+    if (task.status !== 'assigned' || !agentId) throw new Error(`Task ${taskId} is not assigned`);
     task.status = 'running';
     task.startedAt = new Date().toISOString();
-    this.emit({ type: 'task.started', taskId, agentId: task.assignedAgentId, timestamp: task.startedAt });
+    this.emit({ type: 'task.started', taskId, agentId, timestamp: task.startedAt });
     return structuredClone(task);
   }
 
