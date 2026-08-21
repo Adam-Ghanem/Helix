@@ -29,6 +29,14 @@ function help(): void {
   helix learning agent <agentId> [--json]
   helix learning flush [--json]
   helix learning hints "<task>" [--json]
+  helix goal create "<title>" [--description "..."] [--json]
+  helix goal analyze <goalId> [--json]
+  helix plan create <goalId> [--json]
+  helix plan validate <planId> [--json]
+  helix plan show <planId> [--json]
+  helix orchestrate --title "..." --description "..." [--approved-by <actor>] [--json]
+  helix orchestrate status <orchestrationId> [--json]
+  helix orchestrate cancel <orchestrationId> [--json]
   helix mcp serve [--json]
   helix mcp doctor [--json]
   helix mcp tools [--json]
@@ -93,6 +101,25 @@ async function main(): Promise<void> {
     if (action === 'hints') { const task = args.slice(2).filter((arg) => arg !== '--json').join(' ').trim(); if (!task) throw new Error('Usage: helix learning hints "<task>"'); return print(await runtime.learningHints(task, ['analysis'], { subject: process.env.HELIX_SUBJECT ?? 'cli-user' })); }
     if (action === 'flush') { await runtime.flushLearning(); return print({ pendingWrites: runtime.learning.pendingWrites }); }
     throw new Error('Usage: helix learning <agent|hints|flush>');
+  }
+  if (command === 'goal') {
+    const orchestrator = runtime.createOrchestrator({ subject: process.env.HELIX_SUBJECT ?? 'cli-user' });
+    const action = args[1];
+    if (action === 'create') { const title = args.slice(2).filter((arg, index) => arg !== '--description' && arg !== '--json' && !args.slice(2, index + 2).includes('--description')).join(' ').trim(); const descriptionIndex = args.indexOf('--description'); const description = descriptionIndex >= 0 ? args[descriptionIndex + 1] : undefined; if (!title) throw new Error('Usage: helix goal create "<title>" [--description "..."]'); return print(await orchestrator.createGoal({ title, ...(typeof description === 'string' ? { description } : {}) })); }
+    if (action === 'analyze') { if (!args[2]) throw new Error('Usage: helix goal analyze <goalId>'); return print(await orchestrator.analyzeGoal(args[2])); }
+    throw new Error('Usage: helix goal <create|analyze>');
+  }
+  if (command === 'plan') {
+    const orchestrator = runtime.createOrchestrator({ subject: process.env.HELIX_SUBJECT ?? 'cli-user' }); const action = args[1]; const idValue = args[2];
+    if (!idValue || !['create', 'validate', 'show'].includes(action ?? '')) throw new Error('Usage: helix plan <create|validate|show> <id>');
+    if (action === 'create') return print(await orchestrator.createPlan(idValue));
+    if (action === 'validate') return print(await orchestrator.validatePlan(idValue));
+    const plan = orchestrator.plans.get(idValue); if (!plan) throw new Error(`Unknown plan: ${idValue}`); return print(plan);
+  }
+  if (command === 'orchestrate') {
+    const orchestrator = runtime.createOrchestrator({ subject: process.env.HELIX_SUBJECT ?? 'cli-user' }); const action = args[1];
+    if (action === 'status' || action === 'cancel') { const orchestrationId = args[2]; if (!orchestrationId) throw new Error(`Usage: helix orchestrate ${action} <orchestrationId>`); return print(action === 'status' ? await orchestrator.status(orchestrationId) : await orchestrator.cancel(orchestrationId)); }
+    const titleIndex = args.indexOf('--title'); const descriptionIndex = args.indexOf('--description'); const approvalIndex = args.indexOf('--approved-by'); const title = titleIndex >= 0 ? args[titleIndex + 1] : args.slice(1).filter((arg) => !arg.startsWith('--')).join(' '); const description = descriptionIndex >= 0 ? args[descriptionIndex + 1] : title; const approvedBy = approvalIndex >= 0 ? args[approvalIndex + 1] : undefined; if (!title) throw new Error('Usage: helix orchestrate --title "..." --description "..."'); return print(await orchestrator.run({ title, ...(typeof description === 'string' ? { description } : {}) }, typeof approvedBy === 'string' ? { approvedBy } : undefined));
   }
   if (command === 'mcp') {
     const mcp = new HelixMcpServer(runtime, { actorRoles: { 'mcp-user': 'viewer', 'mcp-operator': 'operator', 'mcp-admin': 'admin' } });

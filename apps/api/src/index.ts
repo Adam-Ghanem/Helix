@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
 import { parseNamespace } from '../../../packages/memory/src/index.js';
 import type { MemoryEntryInput, MemoryType, MemoryAccessContext, TaskOutcomeLearningInput } from '../../../packages/memory/src/index.js';
+import type { GoalRisk, GoalConstraints, ReplanTrigger } from '../../../packages/intelligence/src/index.js';
 
 const port = Number(process.env.HELIX_PORT ?? 8787);
 const host = process.env.HELIX_HOST ?? '127.0.0.1';
@@ -14,6 +15,7 @@ const apiKey = process.env.HELIX_API_KEY;
 const maxBodyBytes = Number(process.env.HELIX_MAX_BODY_BYTES ?? 1_048_576);
 const rateLimitPerMinute = Number(process.env.HELIX_RATE_LIMIT_PER_MINUTE ?? 120);
 const runtime = new HelixRuntime({ dataDirectory, ...(modelProvider ? { provider: modelProvider } : {}) });
+const orchestrator = runtime.createOrchestrator({ subject: 'api-user' });
 const buckets = new Map<string, { count: number; resetAt: number }>();
 await runtime.init();
 
@@ -75,6 +77,19 @@ const server = createServer(async (request, response) => {
     if (!withinRateLimit(request)) return json(response, 429, { error: 'rate_limit_exceeded' });
     if (url.pathname === '/api/v1/health' && request.method === 'GET') return json(response, 200, { status: 'ok', service: 'helix-api', provider: runtime.provider.name, sequence: runtime.events.lastSequence, auth: Boolean(apiKey) });
     if (url.pathname === '/api/v1/agents' && request.method === 'GET') return json(response, 200, { agents: runtime.agents.list() });
+    if (url.pathname === '/api/v1/goals' && request.method === 'GET') return json(response, 200, { goals: [...orchestrator.goals.values()] });
+    if (url.pathname === '/api/v1/goals' && request.method === 'POST') { const input = await body(request); if (typeof input.title !== 'string' || !input.title.trim()) return json(response, 400, { error: 'title is required' }); const constraints = isRecord(input.constraints) ? input.constraints as GoalConstraints : undefined; return json(response, 201, await orchestrator.createGoal({ title: input.title, ...(typeof input.description === 'string' ? { description: input.description } : {}), ...(constraints ? { constraints } : {}), ...(Array.isArray(input.requiredCapabilities) ? { requiredCapabilities: input.requiredCapabilities.filter((value): value is string => typeof value === 'string') } : {}), ...(typeof input.priority === 'number' ? { priority: input.priority } : {}), ...(typeof input.urgency === 'number' ? { urgency: input.urgency } : {}), ...(typeof input.risk === 'string' ? { risk: input.risk as GoalRisk } : {}), ...(typeof input.expectedOutcome === 'string' ? { expectedOutcome: input.expectedOutcome } : {}) })); }
+    const goalActionMatch = url.pathname.match(/^\/api\/v1\/goals\/([^/]+)\/(analyze|plan)$/);
+    if (goalActionMatch && request.method === 'POST') { const goalId = goalActionMatch[1]!; if (goalActionMatch[2] === 'analyze') return json(response, 200, await orchestrator.analyzeGoal(goalId)); return json(response, 201, await orchestrator.createPlan(goalId)); }
+    if (url.pathname === '/api/v1/plans' && request.method === 'GET') return json(response, 200, { plans: [...orchestrator.plans.values()] });
+    if (url.pathname === '/api/v1/plans' && request.method === 'POST') { const input = await body(request); if (typeof input.goalId !== 'string') return json(response, 400, { error: 'goalId is required' }); return json(response, 201, await orchestrator.createPlan(input.goalId)); }
+    const planActionMatch = url.pathname.match(/^\/api\/v1\/plans\/([^/]+)\/(validate|execute)$/);
+    if (planActionMatch && request.method === 'POST') { const planId = planActionMatch[1]!; if (planActionMatch[2] === 'validate') return json(response, 200, await orchestrator.validatePlan(planId)); const input = await body(request); return json(response, 200, await orchestrator.executePlan(planId, typeof input.approvedBy === 'string' ? { approvedBy: input.approvedBy } : undefined)); }
+    if (url.pathname === '/api/v1/orchestrations' && request.method === 'GET') return json(response, 200, { orchestrations: [...orchestrator.orchestrations.values()] });
+    if (url.pathname === '/api/v1/orchestrations' && request.method === 'POST') { const input = await body(request); if (typeof input.title !== 'string' || !input.title.trim()) return json(response, 400, { error: 'title is required' }); return json(response, 201, await orchestrator.run({ title: input.title, ...(typeof input.description === 'string' ? { description: input.description } : {}), ...(typeof input.expectedOutcome === 'string' ? { expectedOutcome: input.expectedOutcome } : {}), ...(typeof input.priority === 'number' ? { priority: input.priority } : {}), ...(typeof input.urgency === 'number' ? { urgency: input.urgency } : {}), ...(typeof input.risk === 'string' ? { risk: input.risk as GoalRisk } : {}) }, typeof input.approvedBy === 'string' ? { approvedBy: input.approvedBy } : undefined)); }
+    const orchestrationActionMatch = url.pathname.match(/^\/api\/v1\/orchestrations\/([^/]+)(?:\/(status|cancel|replan|evaluate|explain))?$/);
+    if (orchestrationActionMatch && request.method === 'GET' && !orchestrationActionMatch[2]) return json(response, 200, await orchestrator.status(orchestrationActionMatch[1]!));
+    if (orchestrationActionMatch && (request.method === 'GET' || request.method === 'POST')) { const orchestrationId = orchestrationActionMatch[1]!; const action = orchestrationActionMatch[2]!; if (action === 'status') return json(response, 200, await orchestrator.status(orchestrationId)); if (action === 'cancel') return json(response, 200, await orchestrator.cancel(orchestrationId)); if (action === 'replan') return json(response, 200, await orchestrator.replan(orchestrationId, 'manual' as ReplanTrigger)); if (action === 'evaluate') return json(response, 200, await orchestrator.evaluate(orchestrationId)); return json(response, 200, orchestrator.explain(orchestrationId)); }
     if (url.pathname === '/api/v1/memory/search' && request.method === 'GET') {
       const query = url.searchParams.get('q') ?? '';
       const namespaceText = url.searchParams.get('namespace');

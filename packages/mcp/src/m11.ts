@@ -17,7 +17,7 @@ import { ToolRegistry } from '../../tools/src/index.js';
 
 export type McpRisk = 'READ' | 'WRITE' | 'EXECUTE' | 'ADMIN' | 'REMOTE';
 export type McpErrorCategory = 'INVALID_INPUT' | 'NOT_FOUND' | 'UNAUTHORIZED' | 'FORBIDDEN' | 'RATE_LIMITED' | 'CONFLICT' | 'TIMEOUT' | 'DEPENDENCY_FAILURE' | 'INTERNAL_ERROR';
-export type McpFamily = 'agents' | 'tasks' | 'scheduler' | 'workers' | 'swarm' | 'memory' | 'learning' | 'sandbox' | 'security' | 'policy' | 'providers' | 'models' | 'workflows' | 'evaluation' | 'federation' | 'system' | 'github' | 'filesystem' | 'browser' | 'events';
+export type McpFamily = 'agents' | 'tasks' | 'scheduler' | 'workers' | 'swarm' | 'memory' | 'learning' | 'sandbox' | 'security' | 'policy' | 'providers' | 'models' | 'workflows' | 'evaluation' | 'federation' | 'system' | 'github' | 'filesystem' | 'browser' | 'events' | 'intelligence';
 
 export interface McpActor { id: string; role: SecurityRole; }
 export interface McpCallContext { actor: McpActor; requestId: string; }
@@ -112,10 +112,11 @@ function actorContext(input: Record<string, unknown>, context: McpCallContext): 
 export class McpCapabilityBridge {
   private readonly workflows = new Map<string, WorkflowDefinition>();
   private readonly workflowEngine = new WorkflowEngine();
+  private readonly orchestrator: ReturnType<HelixRuntime['createOrchestrator']>;
   private readonly evaluators = new EvaluationEngine();
   private readonly providers = new ProviderRegistry();
   private readonly federation = new FederationRegistry();
-  constructor(readonly runtime: HelixRuntime) {}
+  constructor(readonly runtime: HelixRuntime) { this.orchestrator = runtime.createOrchestrator({ subject: 'mcp-user' }); }
 
   async dispatch(family: McpFamily, action: string, input: Record<string, unknown>, context: McpCallContext): Promise<unknown> {
     await this.runtime.init();
@@ -135,6 +136,7 @@ export class McpCapabilityBridge {
     if (family === 'evaluation') return this.evaluation(action, input);
     if (family === 'federation') return this.federationAction(action, input);
     if (family === 'events') return this.events(action, input);
+    if (family === 'intelligence') return this.intelligence(action, input);
     if (family === 'system') return this.system(action, input);
     if (family === 'github' || family === 'browser') return { family, action, status: 'boundary', configured: false, message: `${family} connector is not configured; no external operation was attempted` };
     return this.filesystem(action, input);
@@ -219,6 +221,21 @@ export class McpCapabilityBridge {
   private async workflow(action: string, input: Record<string, unknown>): Promise<unknown> { if (action === 'create' || action === 'validate') { const definition = input.definition as WorkflowDefinition; this.workflowEngine.validate(definition); this.workflows.set(definition.name, structuredClone(definition)); return { valid: true, workflow: definition.name, version: definition.version }; } if (action === 'get' || action === 'status' || action === 'history') return this.workflows.get(stringInput(input, 'name')) ?? (() => { throw new McpToolError('NOT_FOUND', 'workflow not found'); })(); if (action === 'list') return { workflows: [...this.workflows.values()] }; if (action === 'run' || action === 'resume') { const definition = this.workflows.get(stringInput(input, 'name')); if (!definition) throw new McpToolError('NOT_FOUND', 'workflow not found'); return this.workflowEngine.run(definition, `mcp-${randomUUID()}`, async (node) => ({ node: node.id, status: 'deterministic-ready' })); } if (action === 'cancel') return { cancelled: true, workflow: stringInput(input, 'name') }; return { action, count: this.workflows.size }; }
   private async evaluation(action: string, input: Record<string, unknown>): Promise<unknown> { if (action === 'register') { const name = stringInput(input, 'name'); this.evaluators.registerSchema(name, stringArrayInput(input, 'requiredKeys')); return { registered: name, kind: 'schema' }; } if (action === 'run' || action === 'results' || action === 'report' || action === 'metrics') return this.evaluators.evaluate({ output: input.output ?? {}, context: typeof input.context === 'object' && input.context ? input.context as Record<string, unknown> : {} }); return { action, deterministic: true }; }
   private federationAction(action: string, input: Record<string, unknown>): unknown { if (action === 'nodes' || action === 'queue' || action === 'audit') return { nodes: this.federation.list(), remoteExecution: 'explicit-only' }; if (action === 'trust') return { action, accepted: false, reason: 'Trust changes require local administrative configuration' }; if (action === 'send') throw new McpToolError('FORBIDDEN', 'Remote federation send is disabled by default'); return { action, nodes: this.federation.list() }; }
+  private async intelligence(action: string, input: Record<string, unknown>): Promise<unknown> {
+    if (action === 'goal_create') return this.orchestrator.createGoal({ title: stringInput(input, 'title'), ...(typeof input.description === 'string' ? { description: input.description } : {}), ...(typeof input.expectedOutcome === 'string' ? { expectedOutcome: input.expectedOutcome } : {}), ...(typeof input.priority === 'number' ? { priority: input.priority } : {}), ...(typeof input.urgency === 'number' ? { urgency: input.urgency } : {}), ...(typeof input.risk === 'string' ? { risk: input.risk as 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' } : {}) });
+    if (action === 'goal_analyze') return this.orchestrator.analyzeGoal(stringInput(input, 'goalId'));
+    if (action === 'plan_create') return this.orchestrator.createPlan(stringInput(input, 'goalId'));
+    if (action === 'plan_validate') return this.orchestrator.validatePlan(stringInput(input, 'planId'));
+    if (action === 'plan_get') { const plan = this.orchestrator.plans.get(stringInput(input, 'planId')); if (!plan) throw new McpToolError('NOT_FOUND', 'plan not found'); return structuredClone(plan); }
+    if (action === 'plan_execute') return this.orchestrator.executePlan(stringInput(input, 'planId'), typeof input.approvedBy === 'string' ? { approvedBy: input.approvedBy } : undefined);
+    if (action === 'plan_cancel' || action === 'plan_status' || action === 'plan_replan' || action === 'plan_evaluate') { const planId = stringInput(input, 'planId'); const record = [...this.orchestrator.orchestrations.values()].find((candidate) => candidate.plan?.id === planId); if (!record) throw new McpToolError('NOT_FOUND', 'orchestration for plan not found'); if (action === 'plan_cancel') return this.orchestrator.cancel(record.id); if (action === 'plan_status') return this.orchestrator.status(record.id); if (action === 'plan_replan') return this.orchestrator.replan(record.id); return this.orchestrator.evaluate(record.id); }
+    if (action === 'orchestrator_run') return this.orchestrator.run({ title: stringInput(input, 'title'), ...(typeof input.description === 'string' ? { description: input.description } : {}), ...(typeof input.expectedOutcome === 'string' ? { expectedOutcome: input.expectedOutcome } : {}), ...(typeof input.priority === 'number' ? { priority: input.priority } : {}), ...(typeof input.urgency === 'number' ? { urgency: input.urgency } : {}), ...(typeof input.risk === 'string' ? { risk: input.risk as 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' } : {}) }, typeof input.approvedBy === 'string' ? { approvedBy: input.approvedBy } : undefined);
+    if (action === 'orchestrator_status') return this.orchestrator.status(stringInput(input, 'orchestrationId'));
+    if (action === 'orchestrator_metrics') return this.orchestrator.metrics();
+    if (action === 'intelligence_explain') { if (typeof input.orchestrationId === 'string') return this.orchestrator.explain(input.orchestrationId); const plan = this.orchestrator.plans.get(stringInput(input, 'planId')); if (!plan) throw new McpToolError('NOT_FOUND', 'plan not found'); return { planId: plan.id, rationale: plan.steps.map((step) => ({ stepId: step.id, title: step.title, capabilities: step.requiredCapabilities, dependencies: step.dependencies, parallelizable: step.parallelizable })) }; }
+    throw new McpToolError('INVALID_INPUT', `unknown intelligence action: ${action}`);
+  }
+
   private async events(action: string, input: Record<string, unknown>): Promise<unknown> { const events = await this.runtime.events.read(); if (action === 'history' || action === 'list') return { events: events.slice(-numberInput(input, 'limit', 100)) }; if (action === 'metrics') return { eventCount: events.length, lastSequence: this.runtime.events.lastSequence }; return { events: events.filter((event) => event.type === input.type).slice(-100) }; }
   private async system(action: string, input: Record<string, unknown>): Promise<unknown> { if (action === 'health' || action === 'doctor') return { status: 'ok', provider: this.runtime.provider.name, memoryBackend: this.runtime.memory.constructor.name, sequence: this.runtime.events.lastSequence }; if (action === 'version') return { name: 'helix', mcp: '1.30.0', runtime: 'M10' }; if (action === 'metrics' || action === 'config' || action === 'diagnostics') return { telemetry: this.runtime.telemetrySnapshot(), dataDirectory: '[configured]' }; return { action, status: 'ok' }; }
   private filesystem(action: string, input: Record<string, unknown>): unknown { const workspace = typeof input.workspacePath === 'string' ? input.workspacePath : process.cwd(); return { family: 'filesystem', action, workspace: '[workspace]', policy: { canonicalValidation: true, shellInterpolation: false, arbitraryHostExecution: false }, configured: true }; }
@@ -245,6 +262,7 @@ const familyActions: Record<McpFamily, string[]> = {
   filesystem: ['workspace', 'roots', 'metadata', 'validate_path', 'permissions', 'boundary', 'audit', 'policy'],
   browser: ['status', 'tabs', 'navigate', 'snapshot', 'capabilities'],
   events: ['list', 'history', 'metrics', 'type', 'recent'],
+  intelligence: ['goal_create', 'goal_analyze', 'plan_create', 'plan_validate', 'plan_get', 'plan_execute', 'plan_cancel', 'plan_status', 'plan_replan', 'plan_evaluate', 'orchestrator_run', 'orchestrator_status', 'orchestrator_metrics', 'intelligence_explain'],
 };
 
 const actionSchema = (family: McpFamily, action: string): z.ZodRawShape => {
@@ -262,13 +280,14 @@ const actionSchema = (family: McpFamily, action: string): z.ZodRawShape => {
   if (family === 'evaluation' && action === 'register') { shape.name = z.string().min(1); shape.requiredKeys = z.array(z.string()); }
   if (family === 'evaluation' && ['run', 'results', 'report'].includes(action)) shape.output = z.unknown().optional();
   if (family === 'events' && action === 'type') shape.type = z.string().min(1);
+  if (family === 'intelligence') { if (action === 'goal_create' || action === 'orchestrator_run') { shape.title = z.string().min(1); shape.description = z.string().optional(); shape.expectedOutcome = z.string().optional(); shape.priority = z.number().int().min(1).max(10).optional(); shape.urgency = z.number().int().min(1).max(10).optional(); shape.risk = z.enum(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']).optional(); shape.approvedBy = z.string().optional(); } if (action === 'goal_analyze' || action === 'plan_create') shape.goalId = z.string().min(1); if (['plan_validate', 'plan_get', 'plan_execute', 'plan_cancel', 'plan_status', 'plan_replan', 'plan_evaluate'].includes(action)) { shape.planId = z.string().min(1); shape.approvedBy = z.string().optional(); } if (action === 'orchestrator_status') shape.orchestrationId = z.string().min(1); if (action === 'intelligence_explain') { shape.orchestrationId = z.string().min(1).optional(); shape.planId = z.string().min(1).optional(); } }
   if (family === 'system') shape.metadata = z.record(z.unknown()).optional();
   if (family === 'filesystem') shape.workspacePath = z.string().optional();
   return shape;
 };
 
 function riskFor(family: McpFamily, action: string): McpRisk {
-  if (family === 'sandbox' && action === 'run') return 'EXECUTE';
+  if ((family === 'sandbox' && action === 'run') || (family === 'intelligence' && (action === 'plan_execute' || action === 'orchestrator_run'))) return 'EXECUTE';
   if (family === 'federation' && action === 'send') return 'REMOTE';
   if (['approve', 'deny', 'reload', 'roles', 'permissions', 'secrets', 'trust', 'config'].includes(action) || ['security', 'policy'].includes(family) && ['approve', 'deny', 'reload'].includes(action)) return 'ADMIN';
   if (['create', 'update', 'delete', 'compact', 'migrate', 'expire', 'spawn', 'pause', 'resume', 'stop', 'cancel', 'retry', 'submit', 'rebalance', 'run', 'write', 'register', 'destroy'].includes(action)) return 'WRITE';
@@ -278,8 +297,8 @@ function riskFor(family: McpFamily, action: string): McpRisk {
 export function buildMcpToolDefinitions(bridge: McpCapabilityBridge): McpToolDefinition[] {
   const definitions: McpToolDefinition[] = [];
   for (const [family, actions] of Object.entries(familyActions) as Array<[McpFamily, string[]]>) for (const action of actions) {
-    const prefix: Record<McpFamily, string> = { agents: 'agent', tasks: 'task', scheduler: 'scheduler', workers: 'worker', swarm: 'swarm', memory: 'memory', learning: 'learning', sandbox: 'sandbox', security: 'security', policy: 'policy', providers: 'provider', models: 'model', workflows: 'workflow', evaluation: 'eval', federation: 'federation', system: 'system', github: 'github', filesystem: 'filesystem', browser: 'browser', events: 'event' };
-    const name = `helix_${prefix[family]}_${action}`;
+    const prefix: Record<McpFamily, string> = { agents: 'agent', tasks: 'task', scheduler: 'scheduler', workers: 'worker', swarm: 'swarm', memory: 'memory', learning: 'learning', sandbox: 'sandbox', security: 'security', policy: 'policy', providers: 'provider', models: 'model', workflows: 'workflow', evaluation: 'eval', federation: 'federation', system: 'system', github: 'github', filesystem: 'filesystem', browser: 'browser', events: 'event', intelligence: 'intelligence' };
+    const name = family === 'intelligence' ? `helix_${action}` : `helix_${prefix[family]}_${action}`;
     const risk = riskFor(family, action);
     definitions.push({ name, family, risk, permissions: [`mcp:${risk.toLowerCase()}`, `helix:${family}`], description: `Helix ${family} capability: ${action.replaceAll('_', ' ')} through the existing governed runtime`, inputSchema: actionSchema(family, action), handler: (input, context) => bridge.dispatch(family, action, input, context) });
   }
@@ -320,8 +339,8 @@ export class HelixMcpServer {
   readonly bridge: McpCapabilityBridge;
   readonly registry: McpToolRegistry;
   readonly sdkServer: McpServer;
-  readonly resources = ['helix://agents', 'helix://tasks', 'helix://scheduler', 'helix://swarm', 'helix://memory', 'helix://metrics', 'helix://events', 'helix://system'];
-  readonly prompts = ['helix_plan_task', 'helix_review_result', 'helix_debug_task', 'helix_security_review', 'helix_swarm_plan', 'helix_memory_recall'];
+  readonly resources = ['helix://agents', 'helix://tasks', 'helix://scheduler', 'helix://swarm', 'helix://memory', 'helix://metrics', 'helix://events', 'helix://system', 'helix://goals', 'helix://plans', 'helix://orchestrations'];
+  readonly prompts = ['helix_plan_task', 'helix_review_result', 'helix_debug_task', 'helix_security_review', 'helix_swarm_plan', 'helix_memory_recall', 'helix_plan_goal', 'helix_review_plan', 'helix_debug_plan', 'helix_replan_failure'];
   constructor(readonly runtime: HelixRuntime, options: { actorRoles?: Record<string, SecurityRole>; rateLimits?: Record<McpRisk, number> } = {}) {
     this.bridge = new McpCapabilityBridge(runtime); this.registry = new McpToolRegistry(undefined, undefined, new RateLimiter(options.rateLimits));
     for (const [actor, role] of Object.entries(options.actorRoles ?? {})) this.registry.authorization.assign(actor, role);
