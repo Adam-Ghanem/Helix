@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/tests/helix.test.js",
+    "test": "node --test dist/tests/*.test.js dist/tests/helix.test.js",
     "test:src": "tsx --test tests/**/*.test.ts",
     "dev:api": "tsx apps/api/src/index.ts",
     "dev:cli": "tsx apps/cli/src/index.ts",
