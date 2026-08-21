@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
 import { defaultSandboxPolicy, dockerAvailable } from '../../../packages/sandbox/src/index.js';
+import { HelixMcpServer, MCP_TOOL_FAMILY_COUNTS } from '../../../packages/mcp/src/index.js';
 
 const args = process.argv.slice(2);
 const jsonOutput = args.includes('--json');
@@ -28,6 +29,11 @@ function help(): void {
   helix learning agent <agentId> [--json]
   helix learning flush [--json]
   helix learning hints "<task>" [--json]
+  helix mcp serve [--json]
+  helix mcp doctor [--json]
+  helix mcp tools [--json]
+  helix mcp resources [--json]
+  helix mcp prompts [--json]
   helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
 }
 
@@ -87,6 +93,16 @@ async function main(): Promise<void> {
     if (action === 'hints') { const task = args.slice(2).filter((arg) => arg !== '--json').join(' ').trim(); if (!task) throw new Error('Usage: helix learning hints "<task>"'); return print(await runtime.learningHints(task, ['analysis'], { subject: process.env.HELIX_SUBJECT ?? 'cli-user' })); }
     if (action === 'flush') { await runtime.flushLearning(); return print({ pendingWrites: runtime.learning.pendingWrites }); }
     throw new Error('Usage: helix learning <agent|hints|flush>');
+  }
+  if (command === 'mcp') {
+    const mcp = new HelixMcpServer(runtime, { actorRoles: { 'mcp-user': 'viewer', 'mcp-operator': 'operator', 'mcp-admin': 'admin' } });
+    const action = args[1] ?? 'doctor';
+    if (action === 'tools') return print({ count: mcp.registry.count(), tools: await mcp.listTools(), familyCounts: MCP_TOOL_FAMILY_COUNTS });
+    if (action === 'resources') return print({ resources: mcp.resources });
+    if (action === 'prompts') return print({ prompts: mcp.prompts });
+    if (action === 'doctor') return print({ server: 'helix-m11', sdk: 'official @modelcontextprotocol/sdk', tools: mcp.registry.count(), resources: mcp.resources.length, prompts: mcp.prompts.length, transports: ['stdio', 'streamable-http'], familyCounts: MCP_TOOL_FAMILY_COUNTS });
+    if (action === 'serve') return mcp.connectStdio();
+    throw new Error('Usage: helix mcp <serve|doctor|tools|resources|prompts>');
   }
   if (command === 'sandbox') {
     const action = args[1];
