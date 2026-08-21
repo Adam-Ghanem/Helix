@@ -24,7 +24,7 @@ test('path and executable guards reject traversal and non-allowlisted commands',
 
 test('plugin registry enforces least-privilege manifests', () => {
   const registry = new PluginRegistry();
-  const policy = { allowedPermissions: ['tool:register', 'provider:register'] as const, allowedCapabilities: ['analysis'] };
+  const policy = { allowedPermissions: ['tool:register', 'provider:register'], allowedCapabilities: ['analysis'] };
   registry.install({ id: 'reviewer', name: 'Reviewer', version: '1.0.0', apiVersion: 'v1', permissions: ['tool:register'], capabilities: ['analysis'], entrypoint: './plugin.js' }, policy);
   assert.equal(registry.list().length, 1);
   assert.throws(() => registry.install({ id: 'unsafe', name: 'Unsafe', version: '1.0.0', apiVersion: 'v1', permissions: ['network:egress'], capabilities: ['analysis'], entrypoint: './plugin.js' }, policy), /permission denied/i);
