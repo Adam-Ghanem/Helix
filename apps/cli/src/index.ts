@@ -56,6 +56,13 @@ function help(): void {
   helix federation status [--json]
   helix federation metrics [--json]
   helix federation dispatch <taskId> [--capabilities <a,b>] [--local|--remote] [--json]
+  helix federation task dispatch <taskId> [--capabilities <a,b>] [--remote] [--json]
+  helix federation task cancel <taskId> [--json]
+  helix federation task retry <taskId> [--json]
+  helix federation runtime <start|stop|status> [--json]
+  helix federation outbox [status|retry] [--json]
+  helix federation deadletters [--json]
+  helix federation trace <taskId> [--json]
   helix federation leases [--json]
   helix mcp serve [--json]
   helix mcp doctor [--json]
@@ -159,7 +166,12 @@ async function main(): Promise<void> {
   }
   if (command === 'federation') {
     const action = args[1] ?? 'doctor';
-    if (action === 'doctor') return print({ localNodeId: runtime.federation.localNodeId, status: runtime.federation.status(), deterministic: true, remoteExecution: 'requires injected signer/verifier and transport' });
+    if (action === 'doctor') return print({ localNodeId: runtime.federation.localNodeId, status: runtime.federation.status(), runtime: runtime.federationRuntimeStatus(), deterministic: true, remoteExecution: 'requires injected signer/verifier and transport' });
+    if (action === 'runtime') { const runtimeAction = args[2] ?? 'status'; if (runtimeAction === 'start') return print(await runtime.startFederationRuntime()); if (runtimeAction === 'stop') return print(await runtime.stopFederationRuntime()); if (runtimeAction === 'status') return print(runtime.federationRuntimeStatus()); throw new Error('Usage: helix federation runtime <start|stop|status>'); }
+    if (action === 'task') { const taskAction = args[2]; const taskId = args[3]; if (!taskAction || !taskId) throw new Error('Usage: helix federation task <dispatch|cancel|retry> <taskId>'); if (taskAction === 'cancel') return print(await runtime.federation.cancel(taskId)); if (taskAction === 'retry') return print(await runtime.federation.retry(taskId)); if (taskAction === 'dispatch') { const capabilities = (option('--capabilities') ?? 'analysis').split(',').map((value) => value.trim()).filter(Boolean); const remote = args.includes('--remote'); return print(await runtime.federation.dispatch({ taskId, requiredCapabilities: capabilities, locality: remote ? 'remote' : 'any', securityContext: { subject: process.env.HELIX_SUBJECT ?? 'cli-user', permissions: remote ? ['federation:dispatch'] : ['federation:local'], trustLevel: remote ? 'TRUSTED' : 'ADMIN' }, authorizationContext: { subject: process.env.HELIX_SUBJECT ?? 'cli-user' } })); } throw new Error('Usage: helix federation task <dispatch|cancel|retry> <taskId>'); }
+    if (action === 'outbox') { const outboxAction = args[2] ?? 'status'; if (outboxAction === 'status') return print({ ...runtime.federation.outboxStatus(), records: runtime.federation.outboxRecords() }); if (outboxAction === 'retry') return print({ delivered: await runtime.federation.retryOutbox(), ...runtime.federation.outboxStatus() }); throw new Error('Usage: helix federation outbox <status|retry>'); }
+    if (action === 'deadletters') return print({ deadLetters: runtime.federation.deadLetters() });
+    if (action === 'trace') { const taskId = args[2]; if (!taskId) throw new Error('Usage: helix federation trace <taskId>'); return print({ taskId, events: (await runtime.events.read((event) => event.taskId === taskId || event.correlationId === taskId)).slice(-100) }); }
     if (action === 'nodes') return print({ nodes: runtime.federation.listNodes() });
     if (action === 'status') return print(runtime.federation.status());
     if (action === 'metrics') return print(runtime.federation.metrics());
@@ -175,7 +187,7 @@ async function main(): Promise<void> {
     if (action === 'tools') return print({ count: mcp.registry.count(), tools: await mcp.listTools(), familyCounts: MCP_TOOL_FAMILY_COUNTS });
     if (action === 'resources') return print({ resources: mcp.resources });
     if (action === 'prompts') return print({ prompts: mcp.prompts });
-    if (action === 'doctor') return print({ server: 'helix-m13', sdk: 'official @modelcontextprotocol/sdk', tools: mcp.registry.count(), resources: mcp.resources.length, prompts: mcp.prompts.length, transports: ['stdio', 'streamable-http'], familyCounts: MCP_TOOL_FAMILY_COUNTS });
+    if (action === 'doctor') return print({ server: 'helix-m15', sdk: 'official @modelcontextprotocol/sdk', tools: mcp.registry.count(), resources: mcp.resources.length, prompts: mcp.prompts.length, transports: ['stdio', 'streamable-http'], familyCounts: MCP_TOOL_FAMILY_COUNTS });
     if (action === 'serve') return mcp.connectStdio();
     throw new Error('Usage: helix mcp <serve|doctor|tools|resources|prompts>');
   }

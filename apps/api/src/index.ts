@@ -4,7 +4,7 @@ import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/i
 import { parseNamespace } from '../../../packages/memory/src/index.js';
 import type { MemoryEntryInput, MemoryType, MemoryAccessContext, TaskOutcomeLearningInput } from '../../../packages/memory/src/index.js';
 import type { GoalRisk, GoalConstraints, ReplanTrigger } from '../../../packages/intelligence/src/index.js';
-import type { FederationNodeRole, FederationTrustLevel } from '../../../packages/federation/src/index.js';
+import type { FederationMessage, FederationNodeRole, FederationTrustLevel } from '../../../packages/federation/src/index.js';
 
 const port = Number(process.env.HELIX_PORT ?? 8787);
 const host = process.env.HELIX_HOST ?? '127.0.0.1';
@@ -13,12 +13,16 @@ const modelProvider = process.env.HELIX_MODEL_API_URL && process.env.HELIX_MODEL
   ? new HttpModelProvider({ endpoint: process.env.HELIX_MODEL_API_URL, apiKey: process.env.HELIX_MODEL_API_KEY, model: process.env.HELIX_MODEL })
   : undefined;
 const apiKey = process.env.HELIX_API_KEY;
+const federationToken = process.env.HELIX_FEDERATION_TOKEN;
+const federationKey = process.env.HELIX_FEDERATION_KEY;
+const federationKeyId = process.env.HELIX_FEDERATION_KEY_ID ?? 'runtime-key';
 const maxBodyBytes = Number(process.env.HELIX_MAX_BODY_BYTES ?? 1_048_576);
 const rateLimitPerMinute = Number(process.env.HELIX_RATE_LIMIT_PER_MINUTE ?? 120);
-const runtime = new HelixRuntime({ dataDirectory, ...(modelProvider ? { provider: modelProvider } : {}) });
+const runtime = new HelixRuntime({ dataDirectory, ...(modelProvider ? { provider: modelProvider } : {}), ...(federationKey ? { federationKey: { keyId: federationKeyId, secret: federationKey } } : {}) });
 const orchestrator = runtime.createOrchestrator({ subject: 'api-user' });
 const buckets = new Map<string, { count: number; resetAt: number }>();
 await runtime.init();
+await runtime.startFederationRuntime();
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, {
@@ -74,6 +78,7 @@ const server = createServer(async (request, response) => {
   }
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`);
   try {
+    if (url.pathname === '/api/v1/federation/messages' && request.method === 'POST') { if (!federationToken || request.headers.authorization !== `Bearer ${federationToken}`) return json(response, 401, { error: 'federation ingress unauthorized' }); const input = await body(request); const message = input as unknown as FederationMessage; await runtime.federation.receiveMessage(message); return json(response, 202, { accepted: true, messageId: message.messageId }); }
     if (!authorized(request, url.pathname)) return json(response, 401, { error: 'unauthorized' });
     if (!withinRateLimit(request)) return json(response, 429, { error: 'rate_limit_exceeded' });
     if (url.pathname === '/api/v1/health' && request.method === 'GET') return json(response, 200, { status: 'ok', service: 'helix-api', provider: runtime.provider.name, sequence: runtime.events.lastSequence, auth: Boolean(apiKey) });
@@ -105,9 +110,19 @@ const server = createServer(async (request, response) => {
     if (url.pathname === '/api/v1/federation/status' && request.method === 'GET') return json(response, 200, runtime.federation.status());
     if (url.pathname === '/api/v1/federation/metrics' && request.method === 'GET') return json(response, 200, runtime.federation.metrics());
     if (url.pathname === '/api/v1/federation/leases' && request.method === 'GET') return json(response, 200, { leases: runtime.federation.listLeases() });
-    if (url.pathname === '/api/v1/federation/tasks/dispatch' && request.method === 'POST') { const input = await body(request); const subject = request.headers['x-helix-subject']?.toString() ?? 'api-user'; if (typeof input.taskId !== 'string' || !Array.isArray(input.requiredCapabilities)) return json(response, 400, { error: 'taskId and requiredCapabilities are required' }); const approvedBy = request.headers['x-helix-approver']?.toString(); const permissions = approvedBy ? ['federation:dispatch'] : []; return json(response, 201, await runtime.federation.dispatch({ taskId: input.taskId, requiredCapabilities: input.requiredCapabilities.filter((value): value is string => typeof value === 'string'), ...(typeof input.priority === 'number' ? { priority: input.priority } : {}), ...(typeof input.locality === 'string' ? { locality: input.locality as 'local' | 'remote' | 'any' } : {}), securityContext: { subject, permissions, trustLevel: typeof input.trustLevel === 'string' ? input.trustLevel as FederationTrustLevel : 'LIMITED' }, authorizationContext: { subject, ...(approvedBy ? { approvedBy } : {}), ...(typeof input.correlationId === 'string' ? { correlationId: input.correlationId } : {}) }, ...(typeof input.title === 'string' ? { title: input.title } : {}), ...(input.input !== undefined ? { input: input.input } : {}) })); }
+    if (url.pathname === '/api/v1/federation/runtime/start' && request.method === 'POST') return json(response, 200, await runtime.startFederationRuntime());
+    if (url.pathname === '/api/v1/federation/runtime/stop' && request.method === 'POST') return json(response, 200, await runtime.stopFederationRuntime());
+    if (url.pathname === '/api/v1/federation/runtime/status' && request.method === 'GET') return json(response, 200, runtime.federationRuntimeStatus());
+    if (url.pathname === '/api/v1/federation/outbox' && request.method === 'GET') return json(response, 200, { records: runtime.federation.outboxRecords(), ...runtime.federation.outboxStatus() });
+    if (url.pathname === '/api/v1/federation/outbox/retry' && request.method === 'POST') return json(response, 200, { delivered: await runtime.federation.retryOutbox(), ...runtime.federation.outboxStatus() });
+    if (url.pathname === '/api/v1/federation/deadletters' && request.method === 'GET') return json(response, 200, { deadLetters: runtime.federation.deadLetters() });
+    const federationTraceMatch = url.pathname.match(/^\/api\/v1\/federation\/traces\/([^/]+)$/);
+    if (federationTraceMatch && request.method === 'GET') return json(response, 200, { taskId: federationTraceMatch[1], events: (await runtime.events.read((event) => event.taskId === federationTraceMatch[1] || event.correlationId === federationTraceMatch[1])).slice(-100) });
+    if (url.pathname === '/api/v1/federation/tasks/dispatch' && request.method === 'POST') { const input = await body(request); const subject = request.headers['x-helix-subject']?.toString() ?? 'api-user'; if (typeof input.taskId !== 'string' || !Array.isArray(input.requiredCapabilities)) return json(response, 400, { error: 'taskId and requiredCapabilities are required' }); const approvedBy = request.headers['x-helix-approver']?.toString(); const permissions = approvedBy ? ['federation:dispatch'] : []; return json(response, 201, await runtime.federation.dispatch({ taskId: input.taskId, requiredCapabilities: input.requiredCapabilities.filter((value): value is string => typeof value === 'string'), ...(typeof input.priority === 'number' ? { priority: input.priority } : {}), ...(typeof input.locality === 'string' ? { locality: input.locality as 'local' | 'remote' | 'any' } : {}), securityContext: { subject, permissions, trustLevel: typeof input.trustLevel === 'string' ? input.trustLevel as FederationTrustLevel : 'LIMITED' }, authorizationContext: { subject, ...(approvedBy ? { approvedBy } : {}), ...(typeof input.correlationId === 'string' ? { correlationId: input.correlationId } : {}) }, ...(typeof input.title === 'string' ? { title: input.title } : {}), ...(input.input !== undefined ? { input: input.input } : {}), ...(isRecord(input.sandbox) ? { sandbox: input.sandbox as never } : {}), ...(typeof input.attemptId === 'string' ? { attemptId: input.attemptId } : {}) })); }
     const federationTaskMatch = url.pathname.match(/^\/api\/v1\/federation\/tasks\/([^/]+)$/);
     if (federationTaskMatch && request.method === 'GET') return json(response, 200, runtime.federation.getTask(federationTaskMatch[1]!));
+    const federationTaskActionMatch = url.pathname.match(/^\/api\/v1\/federation\/tasks\/([^/]+)\/(cancel|retry)$/);
+    if (federationTaskActionMatch && request.method === 'POST') return json(response, 200, federationTaskActionMatch[2] === 'cancel' ? await runtime.federation.cancel(federationTaskActionMatch[1]!) : await runtime.federation.retry(federationTaskActionMatch[1]!));
     if (url.pathname === '/api/v1/memory/search' && request.method === 'GET') {
       const query = url.searchParams.get('q') ?? '';
       const namespaceText = url.searchParams.get('namespace');
