@@ -145,3 +145,41 @@ flowchart TD
   Fencing --> FederationMemory[M10 memory provenance sourceNodeId]
   Retry --> Reassign[Bounded retry / reassignment]
   Reassign --> FederationRouter
+
+
+  subgraph M16["M16 Production Control Plane"]
+    ControlPlane[ControlPlaneController / unified snapshot]
+    MetricsRegistry[Bounded MetricsRegistry]
+    ControlEvents[Typed redacting EventBus]
+    TraceStore[ExecutionTraceStore]
+    Sessions[Bounded SessionManager]
+    Doctor[PASS / WARN / FAIL Doctor]
+    ProviderCatalog[ProviderCatalog + deterministic ModelRouter]
+  end
+
+  User --> ControlPlane
+  CLI --> ControlPlane
+  Dashboard --> ControlPlane
+  MCP --> ControlPlane
+  ControlPlane --> AgentRegistry
+  ControlPlane --> Scheduler
+  ControlPlane --> SwarmManager
+  ControlPlane --> Federation
+  ControlPlane --> Memory
+  ControlPlane --> Policy
+  ControlPlane --> ProviderCatalog
+  ControlPlane --> Sessions
+  ControlPlane --> Doctor
+  Events --> ControlEvents
+  Runtime --> ControlEvents
+  ControlEvents --> TraceStore
+  Runtime --> MetricsRegistry
+  Scheduler --> MetricsRegistry
+  Workers --> MetricsRegistry
+  Federation --> MetricsRegistry
+  Memory --> MetricsRegistry
+  ProviderCatalog --> MetricsRegistry
+  ControlPlane --> MetricsRegistry
+  TraceStore --> Dashboard
+  MetricsRegistry --> Dashboard
+  ControlEvents --> Dashboard

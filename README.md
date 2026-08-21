@@ -279,3 +279,49 @@ SQLite outbox/inbox and local lease stores are durable local infrastructure, not
 ## License
 
 Apache-2.0. Independent implementation. Helix does not copy source code, branding, or proprietary architecture from other projects.
+
+## M16 production control plane and observability
+
+M16 adds a unified `ControlPlaneController` over the existing runtime rather than creating a second scheduler or worker pool. `ControlPlaneSnapshot` combines live AgentRegistry, TaskGraph, LeaseScheduler, worker views, DynamicSwarmManager, federation nodes/tasks/leases, M10 memory, policy, and metrics. The control plane remains a projection and lifecycle adapter; the original components remain authoritative.
+
+M16 adds bounded counters, gauges, and histograms with in-memory, JSON, and Prometheus exporters; a typed redacting EventBus with bounded history and subscriptions; execution traces with stages, structured decisions, events, errors, and metrics; a deterministic provider/model catalog and router; a first-class session record; and a PASS/WARN/FAIL doctor covering runtime, persistence, sandbox, Docker, MCP, providers, federation, signing-key boundary, policy, filesystem, and outbox/inbox health.
+
+The versioned control API exposes `/api/v1/control/status`, `/health`, `/metrics`, `/events`, `/traces`, `/providers`, `/models/route`, `/doctor`, and bounded session lifecycle routes. The static operator dashboard at [`apps/dashboard/index.html`](apps/dashboard/index.html) polls these live endpoints and shows agents, workers, queue, tasks, executions, swarms, federation, memory, and events. It contains no production fixture data.
+
+Use the CLI control plane with:
+
+```bash
+helix status --json
+helix agents list --json
+helix agents status <id> --json
+helix tasks list --json
+helix tasks inspect <id> --json
+helix tasks cancel <id> --json
+helix nodes list --json
+helix nodes status <id> --json
+helix executions list --json
+helix executions inspect <id> --json
+helix trace <execution-id> --json
+helix metrics --prometheus
+helix events tail --json
+helix providers list --json
+helix providers status --json
+helix doctor --json
+helix session create "Review the release"
+helix session status <id> --json
+helix session stop <id> --json
+helix session inspect <id> --json
+```
+
+M16 contributes seven governed control MCP tools and protected control-plane resources. The total typed tool registry is now **232** in this branch. Read-only MCP actors can inspect control state, metrics, events, traces, sessions, and doctor results; destructive execution and remote federation actions remain behind their existing risk, RBAC, policy, rate-limit, audit, and trust boundaries.
+
+Run M16 evidence locally with:
+
+```bash
+pnpm control-plane:demo
+pnpm control-plane:benchmark
+```
+
+The benchmark prints actual p50/p95/p99 measurements for snapshot generation, event dispatch, metric recording, trace creation, agent/task listing, provider routing, and dashboard/API serialization, plus explicit bounded 100-agent and 1,000-task status simulations. The demo uses 100 registered agents, multiple swarms, a real canonical worker-path execution, memory learning, an explicitly allowlisted sandbox command, an intentional bounded failure, metrics/events/traces, and local federation reassignment. The default provider is deterministic and no external provider call is made unless explicitly configured.
+
+M16 does not claim replicated control-plane state, distributed consensus, Byzantine fault tolerance, or kernel-level isolation. Local JSONL/SQLite persistence remains local infrastructure, and the dashboard requires a running API. See [`docs/milestone-16-control-plane.md`](docs/milestone-16-control-plane.md) and [`docs/control-plane.md`](docs/control-plane.md).
