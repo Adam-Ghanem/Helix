@@ -57,9 +57,9 @@ See [`docs/milestone-9-memory-learning.md`](docs/milestone-9-memory-learning.md)
 
 The M11 MCP server is an adapter boundary above the existing runtime. `McpCapabilityBridge` delegates to `HelixRuntime`, `AgentRegistry`, `LeaseScheduler`, `SqliteMemoryStore`, `PersistentLearningEngine`, `SandboxManager`, `PolicyEngine`, `WorkflowEngine`, `EvaluationEngine`, `ProviderRegistry`, telemetry, and the durable event store. It does not replace those components or create a second scheduler or worker implementation.
 
-`McpToolRegistry` stores 204 unique definitions across 21 families. Each definition includes a typed Zod input schema, family, risk classification, permissions, and deterministic handler. The registry applies actor, family, and tool rate limits before dispatch and records bounded sanitized audit events. Errors are normalized into typed categories and do not expose stack traces, secrets, or raw paths.
+`McpToolRegistry` stores 215 unique definitions across 21 families. Each definition includes a typed Zod input schema, family, risk classification, permissions, and deterministic handler. The registry applies actor, family, and tool rate limits before dispatch and records bounded sanitized audit events. Errors are normalized into typed categories and do not expose stack traces, secrets, or raw paths.
 
-The official MCP SDK adapter registers the tool definitions with `McpServer`, thirteen protected `helix://` resources, and ten reusable prompts. `helix mcp serve` uses the official `StdioServerTransport`; `pnpm mcp:serve:http` uses the official `StreamableHTTPServerTransport` on loopback by default. GitHub and browser families are explicit connector boundaries in this local build, and federation send is denied by default.
+The official MCP SDK adapter registers the tool definitions with `McpServer`, sixteen protected `helix://` resources, and twelve reusable prompts. `helix mcp serve` uses the official `StdioServerTransport`; `pnpm mcp:serve:http` uses the official `StreamableHTTPServerTransport` on loopback by default. GitHub and browser families are explicit connector boundaries in this local build. Federation task dispatch is default-deny for untrusted actors and requires explicit remote authorization; arbitrary federation send remains denied.
 
 Authorization is layered. MCP risk checks are applied first, then existing Helix memory ACLs, runtime policy, and sandbox validation remain authoritative. A viewer can read permitted data but cannot mutate memory, spawn agents, execute sandbox commands, approve policy, or send remote federation messages. MCP cannot bypass capability matching, default-deny policy, or M8 sandbox controls.
 
@@ -86,3 +86,23 @@ The swarm state machine is `CREATED → FORMING → READY → RUNNING → REBALA
 Topology rules are explicit: high parallelism favors `parallel` or `mesh`, dependency density favors `pipeline`, high risk or failure favors `hierarchical` with security review, and low load permits role collapse and scale-down. Majority, unanimous, and weighted review use only eligible capable voters and are explicitly application-level rather than Byzantine fault tolerant. Missing task results are never fabricated.
 
 The runtime exposes `runtime.swarms` and M12 orchestrator wrappers. M13 adds versioned `/api/v1/swarms` routes, CLI `helix swarm` commands, fourteen dynamic swarm MCP controls plus two lifecycle/topology controls, and protected swarm/collaboration resources. These remain under the existing authorization, rate-limiting, audit, memory ACL/provenance/sanitization, scheduler, policy, and sandbox boundaries. See [`docs/milestone-13-autonomous-swarm.md`](docs/milestone-13-autonomous-swarm.md) and [`docs/architecture.mmd`](docs/architecture.mmd).
+
+## M14 distributed orchestration and federation
+
+M14 adds a distributed federation adapter in `packages/federation` and injects it into `HelixRuntime` as `runtime.federation`. `NodeRegistry` owns node identity, endpoint, role, capability, trust, health, heartbeat, and explicit lifecycle state. `FederationRouter` ranks only healthy capability-compatible nodes and keeps local/remote locality and trust visible in its decision rationale. `FederationCoordinator` owns message dispatch, node-aware task records, remote completion evidence, federated swarm membership, reassignment, rebalancing, aggregate results, and federation metrics; it does not replace the existing scheduler, workers, router, memory backend, sandbox, or policy engine.
+
+Federation messages are versioned and signed through injectable `MessageSigner` and `MessageVerifier` implementations. The built-in HMAC implementation is deterministic for local operation and tests; production deployments must inject a managed key or asymmetric trust provider. Messages preserve source and destination node identity, correlation ID, trace ID, authorization context, capabilities, priority, nonce, timestamp, TTL, and schema version. Timestamp skew, expiry, invalid signatures, unknown schema versions, and replayed message IDs are rejected before handler effects.
+
+`DistributedLeaseManager` uses a replaceable lease store and monotonic fencing tokens. Acquisition is exclusive by task, renewal requires the current token, expiry is explicit, and stale completion is rejected. `FileLeaseStore` provides a durable local option; it is not a distributed consensus mechanism. `InMemoryFederationTransport` is a deterministic transport adapter for local testing. Remote task handling is explicit and default-deny: the security context must contain `federation:dispatch` and a non-`UNTRUSTED` trust level, and remote nodes do not inherit local privileges.
+
+The M14 control flow is:
+
+```text
+Node registration → health/heartbeat → capability-safe routing → signed task.submit
+→ remote coordinator lease → existing worker execution seam → signed accept/completion
+→ source correlation/fencing validation → durable evidence → bounded recovery/reassignment
+```
+
+The API exposes federation node, status, heartbeat, drain, removal, metrics, lease, dispatch, and task-status routes. The CLI exposes `helix federation doctor|nodes|node|status|metrics|dispatch|leases`. The governed MCP registry adds federation node, heartbeat, dispatch, task-status, lease, metrics, message-verification, and trust-inspection actions, together with federation resources and recovery/security prompts. All remain behind the existing MCP actor authorization, risk classification, rate limiting, sanitized audit, and error normalization layers.
+
+The current M14 implementation intentionally leaves distributed graph/snapshot persistence, multi-host transport deployment, shared lease/outbox authority, quorum or Byzantine consensus, TLS and secret-manager integration, production worker execution adapters, chaos testing, and independent security review as release gates. See [`docs/milestone-14-federation.md`](docs/milestone-14-federation.md) and [`docs/architecture.mmd`](docs/architecture.mmd).

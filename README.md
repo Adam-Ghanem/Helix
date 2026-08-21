@@ -52,7 +52,7 @@ To use a real OpenAI-compatible provider, set `HELIX_MODEL_API_URL`, `HELIX_MODE
 | `packages/learning` | Durable outcomes, bounded routing hints, agent experience, async queue, and batch persistence | M10 implemented; production distributed queue remains |
 | `packages/security` / `packages/sandbox` | RBAC, secret metadata, canonical paths, command allowlists, environment filtering, local process controls, Docker isolation, lifecycle management, and audit log | M8 implemented; deployment hardening and Docker daemon policy remain |
 | `packages/plugins` / `packages/providers` | Plugin trust and provider/model capability discovery | Implemented foundations |
-| `packages/federation` | Signed messages, replay protection, node registry, heartbeat | Implemented foundation |
+| `packages/federation` | Signed messages, replay protection, node registry, heartbeat, capability-safe routing, distributed leases, transports, recovery, and federated swarms | M14 implemented; production multi-host persistence and transport deployment remain |
 | `packages/sdk` | TypeScript client for execution, lifecycle, memory, telemetry, approvals | Implemented |
 | `apps/api` | Versioned HTTP API | Implemented |
 | `apps/cli` | Professional CLI with JSON output | Implemented |
@@ -139,9 +139,9 @@ The benchmark uses 100 agents, 1,000 tasks, and 10,000 seeded memories. It repor
 
 ## M11 full MCP ecosystem
 
-M11 adds an official `@modelcontextprotocol/sdk` adapter over existing Helix capabilities. The server registers **204 unique typed tools** across agents, tasks, scheduler, workers, swarm, memory, learning, sandbox, security, policy, providers, models, workflows, evaluation, federation, system, GitHub boundary, filesystem, browser boundary, events, and intelligence families. Each tool has a unique name, Zod input schema, family, risk classification, permissions, deterministic error category, authorization check, rate-limit bucket, and sanitized audit record.
+M11 adds an official `@modelcontextprotocol/sdk` adapter over existing Helix capabilities. The server registers **215 unique typed tools** across agents, tasks, scheduler, workers, swarm, memory, learning, sandbox, security, policy, providers, models, workflows, evaluation, federation, system, GitHub boundary, filesystem, browser boundary, events, and intelligence families. Each tool has a unique name, Zod input schema, family, risk classification, permissions, deterministic error category, authorization check, rate-limit bucket, and sanitized audit record.
 
-The server also exposes thirteen protected resources and ten policy-aware prompts. Supported transports are official SDK stdio and Streamable HTTP:
+The server also exposes sixteen protected resources and twelve policy-aware prompts. Supported transports are official SDK stdio and Streamable HTTP:
 
 ```bash
 helix mcp doctor --json
@@ -172,7 +172,7 @@ helix orchestrate --title "Document the benchmark" --description "Write and revi
 helix orchestrate status <orchestration-id>
 ```
 
-The versioned API exposes goal, plan, and orchestration lifecycle routes. M11 MCP adds fourteen typed intelligence tools, three protected intelligence resources, and four reusable prompts through the existing authorization, rate-limiting, audit, and transport boundary. Run the deterministic demonstration and benchmark with:
+The versioned API exposes goal, plan, and orchestration lifecycle routes. M12 MCP adds fourteen typed intelligence tools, three protected intelligence resources, and four reusable prompts through the existing authorization, rate-limiting, audit, and transport boundary. Run the deterministic demonstration and benchmark with:
 
 ```bash
 pnpm intelligence:demo
@@ -209,6 +209,36 @@ pnpm swarm:benchmark
 ```
 
 The M13 benchmark uses 100 registered agents and 1,000 bounded task units and reports measured scaling, formation, delegation, completion, failure/health, rebalancing, consensus, aggregation, memory lookup, throughput, and end-to-end timings. It is a local observation, not a production capacity guarantee. M13 consensus is application-level and not Byzantine fault tolerant; the process-local swarm graph and learning queue require distributed persistence and delivery work for multi-host deployments. See [`docs/milestone-13-autonomous-swarm.md`](docs/milestone-13-autonomous-swarm.md) for the design, operational boundaries, verification, and limitations.
+
+## M14 distributed orchestration and federation
+
+M14 extends the M13 swarm control plane across explicit federation nodes. The federation package provides node registration and lifecycle state, heartbeat and stale-node detection, capability and health-aware routing, signed versioned messages with timestamp/TTL and replay protection, replaceable transports, fencing-token distributed leases, node-aware worker metadata, remote task dispatch and completion evidence, bounded reassignment and recovery, and federated swarm membership and aggregation.
+
+Remote execution is **default-deny** unless the caller supplies explicit `federation:dispatch` authorization and a trusted security context. Authorization, correlation IDs, trace IDs, priority, capabilities, and provenance are preserved across messages. Remote nodes do not inherit local privileges. The existing scheduler, worker path, sandbox, policy engine, memory ACL/provenance/sanitization, and MCP authorization/audit/rate-limiting layers remain authoritative; M14 adds adapters rather than duplicate execution systems.
+
+Use the CLI surfaces as follows:
+
+```bash
+helix federation doctor --json
+helix federation nodes --json
+helix federation node register --name worker-b --endpoint https://worker-b.example --role worker --capabilities coding,testing
+helix federation node drain <node-id>
+helix federation status --json
+helix federation metrics --json
+helix federation dispatch task-1 --capabilities coding --local --json
+helix federation leases --json
+```
+
+The API exposes `/api/v1/federation/nodes`, node status, heartbeat, drain, removal, `/api/v1/federation/status`, `/api/v1/federation/metrics`, `/api/v1/federation/leases`, `/api/v1/federation/tasks/dispatch`, and task status routes. MCP adds governed federation node, dispatch, lease, metrics, message-verification, and trust-inspection actions, together with protected federation resources and recovery/security prompts.
+
+Run the deterministic five-node, 100-agent, 1,000-task demonstration and measured benchmark with:
+
+```bash
+pnpm federation:demo
+pnpm federation:benchmark
+```
+
+M14 benchmark output is measured locally and includes node registration, heartbeat, HMAC verification, capability routing, lease acquire/release, remote dispatch, reassignment, scheduling, and 1,000-task throughput. The in-memory transport is a deterministic test adapter; file/SQLite lease stores are replaceable persistence options but are not distributed consensus. Production deployment still requires shared durable graph/state, a production transport, multi-host lease authority, outbox/idempotency design, TLS and secret management, authorization review, chaos testing, and independent security review. See [`docs/milestone-14-federation.md`](docs/milestone-14-federation.md) for the full design and limitations.
 
 ## License
 

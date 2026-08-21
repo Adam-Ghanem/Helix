@@ -26,11 +26,37 @@ flowchart TD
   Delegation --> Handoff[Bounded handoff history + loop detection]
   Handoff --> Delegation
   SwarmManager --> Scale[Bounded scale up / scale down]
-  Scale --> Registry[Existing Agent Registry + capacity]
+  Scale --> AgentRegistry[Existing Agent Registry + capacity]
   SwarmManager --> Health[SwarmHealthMonitor]
   Health --> Rebalance[Deterministic rebalancing]
   Rebalance --> Scheduler
   Health --> Topology
+
+  Runtime --> Federation[M14 FederationCoordinator]
+  Federation --> Nodes[NodeRegistry]
+  Nodes --> Membership[Node identity / role / capability / trust]
+  Nodes --> Heartbeat[Heartbeat + stale-node detection]
+  Heartbeat --> NodeHealth[Health / load / latency]
+  Federation --> FederationRouter[Capability-safe federation router]
+  FederationRouter --> NodeHealth
+  FederationRouter --> LocalNode[Local Helix node]
+  FederationRouter --> RemoteNode[Healthy remote node]
+  Federation -->|remote authorized| Signer[Injected signer / verifier]
+  Signer --> Envelope[Versioned signed message envelope]
+  Envelope --> Replay[Timestamp / TTL / schema / replay checks]
+  Replay --> Transport[Replaceable federation transport]
+  Transport --> RemoteCoordinator[Remote FederationCoordinator]
+  RemoteCoordinator --> RemoteLease[Distributed lease + fencing token]
+  RemoteLease --> RemoteWorkers[Existing remote worker execution seam]
+  RemoteWorkers --> RemoteEvidence[Signed accept / completion / failure evidence]
+  RemoteEvidence --> Transport
+  Transport --> Correlation[Correlation / trace / authorization validation]
+  Correlation --> Federation
+  Federation --> Recovery[Bounded expiry / recovery / reassignment]
+  Recovery --> FederationRouter
+  Federation --> FederatedSwarm[Federated swarm membership]
+  FederatedSwarm --> FederatedAggregate[Explicit result aggregation]
+  FederatedAggregate --> Federation
 
   Scheduler --> Workers[Existing workers / task execution]
   Workers --> SandboxManager[Existing SandboxManager]
@@ -44,11 +70,11 @@ flowchart TD
   Evaluator --> Aggregate[SwarmResultAggregator]
   Aggregate --> Consensus[Application-level review consensus]
   Consensus --> Complete[COMPLETED / result]
-  Evaluator -->|failure / timeout| Recovery[Bounded failure recovery]
-  Recovery -->|retry or handoff| Delegation
-  Recovery -->|replan when limits remain| Replanner[Bounded Intelligence Replanner]
+  Evaluator -->|failure / timeout| SwarmRecovery[Bounded failure recovery]
+  SwarmRecovery -->|retry or handoff| Delegation
+  SwarmRecovery -->|replan when limits remain| Replanner[Bounded Intelligence Replanner]
   Replanner --> Selector
-  Recovery -->|no alternative or limit reached| Failed[FAILED]
+  SwarmRecovery -->|no alternative or limit reached| Failed[FAILED]
 
   Runtime --> Cancel[Durable cancellation guard]
   Cancel --> Cancelled[CANCELLED]
@@ -62,6 +88,8 @@ flowchart TD
   ACL --> Recall
   SwarmManager --> SwarmMemory[swarm:<id> learning observations]
   SwarmMemory --> Memory
+  Federation --> FederationMemory[Federated task and node observations]
+  FederationMemory --> ACL
   Evaluator --> Learning[Persistent Learning Engine]
   Learning --> Queue[Bounded async learning queue]
   Queue --> Batch[Transactional batch persistence]
@@ -69,27 +97,29 @@ flowchart TD
   Learning --> Bonus[Bounded learning signal <= 10%]
   Bonus --> ExistingRouter[Existing AgentRouter]
   Selector --> ExistingRouter
-  ExistingRouter --> Registry
+  ExistingRouter --> AgentRegistry
 
   StepEvidence --> Events[Durable event store]
   SwarmManager --> Events
-  Events --> Replay[Replay + restart recovery evidence]
+  Federation --> Events
+  Events --> ReplayEvidence[Replay + restart recovery evidence]
   Runtime --> Telemetry[Traces + metrics + structured logs]
 
   Runtime --> Policy[Default-deny Policy + RBAC + Approvals]
   Policy -. guards .-> Validator
   Policy -. guards .-> Delegation
+  Policy -. guards .-> Federation
   Policy -. guards .-> Workers
   Policy -. guards .-> SandboxManager
   Runtime --> Provider[Provider interface]
   Provider --> Models[Provider / model discovery]
   Runtime --> Knowledge[Local knowledge graph]
 
-  Runtime --> MCP[M11/M12/M13 MCP Server]
-  MCP --> RegistryMCP[204 typed tool registry]
+  Runtime --> MCP[M11/M12/M13/M14 MCP Server]
+  MCP --> RegistryMCP[215 typed tool registry]
   RegistryMCP --> Families[21 capability families]
-  MCP --> Resources[13 protected resources]
-  MCP --> Prompts[10 policy-aware prompts]
+  MCP --> Resources[16 protected resources]
+  MCP --> Prompts[12 policy-aware prompts]
   MCP --> Auth[Actor authorization + rate limits + audit]
   Auth --> Policy
   RegistryMCP --> McpAudit[Sanitized MCP audit log]
