@@ -15,7 +15,11 @@ flowchart TD
   Outcome --> Reputation[Agent Reputation and Health]
   Outcome --> Metrics[Metrics and Events]
   Outcome --> Learning[Deterministic Learning]
-  Learning --> Memory[Persistent Memory]
+  Learning --> Queue[Bounded Async Learning Queue]
+  Queue --> Batch[Transactional Batch Write]
+  Batch --> Memory[SQLite / JSONL Persistent Memory]
+  Memory --> Cache[TTL/LRU Recall Cache]
+  Cache --> Recall
   Memory --> Recall
   Learning --> Bonus[Bounded <= 10% Routing Signal]
   Bonus --> Router
@@ -29,9 +33,9 @@ The policy engine remains default-deny and governs tool, plugin, MCP, and approv
 
 ## Persistent memory
 
-`MemoryStore` is a local-first durable JSONL store. It preserves the previous `MemoryRecord` API and adds typed `MemoryEntry` records with strict namespaces, metadata, confidence, tags, provenance, and access policies. `MemoryStore` serializes writes in-process and replays append-only upsert/delete records on restart. The public abstraction is intentionally independent of the backend so SQLite, pgvector, Qdrant, Chroma, Neo4j, or other adapters can be introduced later.
+`MemoryBackend` is the stable persistence abstraction. M9 `MemoryStore` remains a local-first durable JSONL implementation that preserves the previous `MemoryRecord` API. M10 adds `SqliteMemoryStore`, using `better-sqlite3`, WAL mode, transactional batch writes, normalized namespace/agent/swarm/task/type/tag/timestamp/confidence indexes, FTS5 lexical candidate retrieval, bounded result limits, JSONL migration, and deterministic compaction. The runtime defaults to SQLite; JSONL remains an explicit compatibility backend. Remote PostgreSQL, pgvector, Qdrant, Chroma, and Neo4j adapters remain future extension points.
 
-Hybrid search is transparent and configurable. It combines keyword matching, a deterministic local embedding abstraction, recency decay, namespace relevance, confidence, and provenance. The deterministic embedding provider is a stable test/local adapter and makes no claim to be a production semantic model.
+Hybrid search is transparent and configurable. SQLite first narrows candidates through indexed filters and FTS5, then combines keyword matching, a deterministic local embedding abstraction, recency decay, namespace relevance, confidence, and provenance. A bounded TTL/LRU `MemoryCache` avoids repeated reads and is invalidated on mutation. The deterministic embedding provider is a stable test/local adapter and makes no claim to be a production semantic model.
 
 ## Access and provenance
 
@@ -41,10 +45,10 @@ Memory is untrusted data. Helix never executes memory contents as code or blindl
 
 ## Learning integration
 
-`PersistentLearningEngine` records successful solutions, routing hints, private agent experience, and failed patterns. It exposes recall, routing hints, execution hints, agent experience, success/failure recording, and bounded routing scores. Failure signals require a configurable repeated-failure threshold and confidence threshold before a temporary negative preference is returned. Half-life decay changes influence over time without deleting memories.
+`PersistentLearningEngine` records successful solutions, routing hints, private agent experience, and failed patterns. It exposes recall, routing hints, execution hints, agent experience, success/failure recording, and bounded routing scores. Failure signals require a configurable repeated-failure threshold and confidence threshold before a temporary negative preference is returned. Runtime outcomes are queued asynchronously by default, deduplicated by replay key, and drained in bounded batches; `flushLearning()` provides an explicit durability barrier. Half-life decay changes influence over time without deleting memories.
 
 ## External surfaces
 
-The versioned API exposes memory CRUD/search and learning hint, experience, and outcome endpoints. The CLI exposes memory search/list/inspect/stats and learning agent/hints commands. The MCP package registers governed memory and learning tools with explicit schemas and `memory:read` permission. Existing API, CLI, provider, plugin, RBAC, federation, knowledge graph, workflow, swarm, and sandbox surfaces remain available.
+The versioned API exposes memory CRUD/search/compact and learning hint, experience, outcome, and flush endpoints. The CLI exposes memory search/list/inspect/stats/compact and learning agent/hints/flush commands. The MCP package registers governed memory and learning tools with explicit schemas and `memory:read` permission. Existing API, CLI, provider, plugin, RBAC, federation, knowledge graph, workflow, swarm, and sandbox surfaces remain available.
 
-See [`docs/milestone-9-memory-learning.md`](docs/milestone-9-memory-learning.md) for the detailed M9 design, security review, benchmark method, and limitations. See [`docs/architecture.mmd`](docs/architecture.mmd) for the full Mermaid system diagram.
+See [`docs/milestone-9-memory-learning.md`](docs/milestone-9-memory-learning.md) and [`docs/milestone-10-production-memory.md`](docs/milestone-10-production-memory.md) for design, security review, benchmark method, and limitations. See [`docs/architecture.mmd`](docs/architecture.mmd) for the full Mermaid system diagram.

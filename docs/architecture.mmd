@@ -3,8 +3,11 @@ flowchart TD
   User --> CLI[helix CLI]
   API --> Runtime[Helix Runtime]
   CLI --> Runtime
-  Runtime --> Recall[Memory Recall]
-  Recall --> Router[Adaptive Router]
+  Runtime --> Recall[Fast Cached Recall]
+  Recall --> Cache[TTL/LRU MemoryCache]
+  Cache --> Search[Bounded Hybrid Search]
+  Search --> Indexes[SQLite indexes + FTS5 candidates]
+  Indexes --> Router[Adaptive Router]
   Runtime --> Router
   Router --> Planner[Validated Task DAG]
   Router --> Agents[Agent Registry + Health + Reputation]
@@ -13,10 +16,17 @@ flowchart TD
   Runtime --> Provider[Provider Interface]
   Runtime --> Events[Durable Event Store]
   Events --> Replay[Replay + Atomic Snapshots]
-  Runtime --> Memory[Persistent MemoryStore]
+  Runtime --> Memory[MemoryBackend]
+  Memory --> SQLite[SqliteMemoryStore
+WAL + transactions + indexes]
+  Memory --> JSONL[MemoryStore
+M9 compatibility]
   Memory --> ACL[Namespace ACL + Provenance]
-  Memory --> Search[Hybrid Search + Deterministic Embedding Abstraction]
+  Memory --> Compaction[Compaction + VACUUM + JSONL migration]
   Runtime --> Learning[Persistent Learning Engine]
+  Learning --> Queue[Bounded Async Learning Queue]
+  Queue --> Batch[Batch outcome persistence]
+  Batch --> Memory
   Learning --> Outcome[Outcome Sanitization + Idempotency]
   Outcome --> Memory
   Learning --> Bonus[Bounded Learning Bonus <= 10%]
@@ -24,8 +34,10 @@ flowchart TD
   Runtime --> Telemetry[Traces + Metrics + Logs]
   Runtime --> SandboxManager[SandboxManager]
   SandboxManager --> SandboxPolicy[Canonical Paths + Exec Allowlist + Env Filter]
-  SandboxManager --> Local[LocalSandbox\nBest-effort controls]
-  SandboxManager --> Docker[DockerSandbox\nKernel/container controls]
+  SandboxManager --> Local[LocalSandbox
+Best-effort controls]
+  SandboxManager --> Docker[DockerSandbox
+Kernel/container controls]
   Local --> Execution[Bounded Command Execution]
   Docker --> Execution
   Execution --> Audit[SandboxAuditLog]

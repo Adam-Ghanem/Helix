@@ -8,7 +8,7 @@ Helix is an autonomous multi-agent operating system and orchestration runtime. T
 
 This repository contains a runnable vertical slice rather than a non-functional mock. It includes an append-only durable event store with replay and snapshots, idempotent event handling, a validated task-DAG engine, pluggable routing strategies, policy evaluation with approval gates, resource budgets, a lease-based local scheduler, structured cognition metadata, agent health and reputation tracking, a provider-neutral runtime, lifecycle controls for pause/resume/cancel/retry/checkpoint/recovery, a policy-backed local and Docker execution sandbox with audit logging, a bounded and optionally authenticated HTTP API, a JSON-capable CLI, a TypeScript SDK, a dashboard shell, and unit/integration tests.
 
-The default runtime uses a local JSONL event log so it can run without Docker or an external database. The persistence interfaces are intentionally provider-neutral; PostgreSQL, Redis, vector databases, graph databases, MCP transports, and federated nodes are declared as extension points and are not represented as complete implementations in this release. Sandbox execution is now available through a real local backend and an optional Docker backend; local mode provides process and policy controls but is not equivalent to container isolation.
+The default runtime uses a local JSONL event log for execution events and a transactional SQLite memory database for durable intelligence, so it can run without Docker or a remote database. The persistence interfaces remain provider-neutral; PostgreSQL, Redis, remote vector databases, graph databases, MCP transports, and federated nodes are declared as extension points and are not represented as complete implementations in this release. Sandbox execution is available through a real local backend and an optional Docker backend; local mode provides process and policy controls but is not equivalent to container isolation.
 
 ## Quick start
 
@@ -42,14 +42,14 @@ To use a real OpenAI-compatible provider, set `HELIX_MODEL_API_URL`, `HELIX_MODE
 | `packages/scheduler` | Durable local leases and recovery hooks | Implemented |
 | `packages/runtime` | Observe–interpret–plan–act–evaluate lifecycle, lifecycle controls, memory, telemetry | Implemented |
 | `packages/agents` | Built-in catalog, health, reputation | Implemented |
-| `packages/memory` | Access-controlled structured memory and deterministic search | Implemented |
+| `packages/memory` | Access-controlled structured memory, SQLite/JSONL persistence, indexes, cache, bounded hybrid search, and compaction | M10 implemented; remote vector/database adapters remain |
 | `packages/tools` / `packages/mcp` | Tool schema registry and MCP security boundary | Implemented boundary |
 | `packages/workflows` | Versioned declarative workflow DAGs | Implemented |
 | `packages/swarm` / `packages/consensus` | Swarm topology planning and consensus strategies | Implemented |
 | `packages/knowledge` | Provenance-aware graph entities and relations | Implemented |
 | `packages/observability` | Correlated spans, metrics, and structured logs | Implemented |
 | `packages/evaluation` | Rule, schema, test, human, and non-authoritative LLM-judge evaluation contracts | Implemented |
-| `packages/learning` | Trajectory evidence and reusable strategy/tool patterns | Implemented |
+| `packages/learning` | Durable outcomes, bounded routing hints, agent experience, async queue, and batch persistence | M10 implemented; production distributed queue remains |
 | `packages/security` / `packages/sandbox` | RBAC, secret metadata, canonical paths, command allowlists, environment filtering, local process controls, Docker isolation, lifecycle management, and audit log | M8 implemented; deployment hardening and Docker daemon policy remain |
 | `packages/plugins` / `packages/providers` | Plugin trust and provider/model capability discovery | Implemented foundations |
 | `packages/federation` | Signed messages, replay protection, node registry, heartbeat | Implemented foundation |
@@ -95,7 +95,7 @@ helix execution <execution-id> checkpoint
 
 The runtime persists lifecycle events and can rehydrate completed executions from the event log. `helix recover` is planned as a daemon command; the runtime recovery API is currently exposed through the SDK and application layer.
 
-Measured benchmark output is written by `node benchmarks/runtime.mjs` or `pnpm benchmark` and is never hard-coded into documentation. The golden flow is available through `pnpm golden-demo`, and the sandbox flow is available through `pnpm sandbox-demo`. See [`docs/milestone-8-sandbox.md`](docs/milestone-8-sandbox.md) for backend guarantees and deployment limitations.
+Measured benchmark output is written by `node benchmarks/runtime.mjs` or `pnpm benchmark` and is never hard-coded into documentation. The golden flow is available through `pnpm golden-demo`, the sandbox flow is available through `pnpm sandbox-demo`, and the M10 memory comparison is available through `pnpm memory-benchmark`. See [`docs/milestone-8-sandbox.md`](docs/milestone-8-sandbox.md) for backend guarantees and deployment limitations.
 
 ## M9 intelligence and persistent memory
 
@@ -121,7 +121,21 @@ pnpm memory-demo
 pnpm memory-benchmark
 ```
 
-The deterministic embedding provider is a local testing abstraction, not a production neural semantic model. The default JSONL backend is local-first and can later be replaced behind the storage and embedding interfaces. See [`ARCHITECTURE.md`](ARCHITECTURE.md), [`docs/milestone-9-memory-learning.md`](docs/milestone-9-memory-learning.md), and [`docs/architecture.mmd`](docs/architecture.mmd).
+The deterministic embedding provider is a local testing abstraction, not a production neural semantic model. M10 uses `better-sqlite3` with WAL mode, transactional batch writes, namespace/agent/task/type/tag/timestamp/confidence indexes, an FTS5 candidate index, bounded retrieval, an LRU/TTL cache, JSONL migration support, and compaction. Set `useSqliteMemory: false` only when explicitly retaining the M9 JSONL backend for compatibility. Learning writes are asynchronous by default in the runtime and can be awaited through `flushLearning()`; direct learning APIs remain deterministic. See [`ARCHITECTURE.md`](ARCHITECTURE.md), [`docs/milestone-9-memory-learning.md`](docs/milestone-9-memory-learning.md), [`docs/milestone-10-production-memory.md`](docs/milestone-10-production-memory.md), and [`docs/architecture.mmd`](docs/architecture.mmd).
+
+## M10 production memory and fast intelligence
+
+M10 addresses the M9 retrieval bottleneck with a real transactional SQLite backend. The SQLite store uses WAL mode, indexed namespace/agent/swarm/task/type/timestamp/confidence columns, normalized tag indexes, FTS5 lexical candidate retrieval, bounded hybrid scoring, a TTL/LRU cache, batched learning persistence, duplicate-pattern compaction, optional expired-record cleanup, `VACUUM`, and one-time JSONL migration support. Existing M9 JSONL behavior remains available as an explicit compatibility backend.
+
+The runtime defaults to SQLite memory and queues outcome learning asynchronously so task execution does not wait for persistent learning writes. The queue deduplicates replay keys, drains in bounded batches, and exposes an explicit flush operation. This is an in-process bounded queue, not a distributed delivery guarantee.
+
+Run the M10 benchmark with:
+
+```bash
+pnpm memory-benchmark
+```
+
+The benchmark uses 100 agents, 1,000 tasks, and 10,000 seeded memories. It reports routing latency, memory lookup latency with p50/p95/p99, write latency with p50/p95/p99, throughput, task completion, CPU, heap delta, and measured deltas. The benchmark must be treated as a local deterministic measurement rather than a production capacity promise.
 
 ## License
 
