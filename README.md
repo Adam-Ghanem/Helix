@@ -240,6 +240,42 @@ pnpm federation:benchmark
 
 M14 benchmark output is measured locally and includes node registration, heartbeat, HMAC verification, capability routing, lease acquire/release, remote dispatch, reassignment, scheduling, and 1,000-task throughput. The in-memory transport is a deterministic test adapter; file/SQLite lease stores are replaceable persistence options but are not distributed consensus. Production deployment still requires shared durable graph/state, a production transport, multi-host lease authority, outbox/idempotency design, TLS and secret management, authorization review, chaos testing, and independent security review. See [`docs/milestone-14-federation.md`](docs/milestone-14-federation.md) for the full design and limitations.
 
+## M15 production distributed execution
+
+M15 adds a composable `FederationNodeRuntime` that accepts authenticated remote tasks and executes them through the existing `HelixRuntime` path: `AgentRouter` → `AgentRegistry` → `LeaseScheduler` → worker/provider → `SandboxManager` and `PolicyEngine` → M10 memory/learning. It does not duplicate the scheduler, worker pool, memory backend, registry, sandbox, policy, or MCP authorization boundary.
+
+The federation control plane now includes key-ID-aware HMAC authentication with bounded key rotation, durable SQLite outbox/inbox state, idempotent delivery and dead-letter handling, HTTP transport with bounded retries and circuit breaking, deterministic drop/delay/duplicate/corrupt/partition/crash injection, lease expiry and fencing validation, node runtime start/stop/drain, remote cancellation and timeout classification, retry with fresh attempts, reassignment, and federated outcome provenance using `sourceNodeId`.
+
+Remote execution remains **default-deny**. It requires explicit `federation:dispatch` permission and a `TRUSTED` or `ADMIN` context; `UNTRUSTED` and `LIMITED` contexts are rejected. Correlation IDs, trace IDs, capabilities, sandbox requests, authorization context, attempt IDs, and fencing tokens are preserved or validated across the boundary. The current build exposes **29 federation MCP actions and 225 total typed MCP tools**.
+
+Use the M15 runtime and task controls as follows:
+
+```bash
+helix federation runtime status --json
+helix federation runtime start --json
+helix federation task dispatch task-1 --node worker-b --capabilities coding --json
+helix federation task cancel task-1 --json
+helix federation task retry task-1 --json
+helix federation outbox status --json
+helix federation outbox retry --json
+helix federation deadletters --json
+helix federation trace task-1 --json
+```
+
+For HTTP federation ingress, configure `HELIX_FEDERATION_TOKEN`, `HELIX_FEDERATION_KEY`, and `HELIX_FEDERATION_KEY_ID`; the endpoint is `POST /api/v1/federation/messages`. HMAC is a development/test implementation. Production deployments should inject an asymmetric, mTLS, KMS-backed, or equivalent reviewed peer-authentication provider and place ingress behind TLS and operational controls.
+
+Run the M15 artifacts with:
+
+```bash
+pnpm distributed-runtime:demo
+pnpm distributed-runtime:benchmark
+node --test dist/tests/federation-milestone-15.test.js
+```
+
+The demo uses five nodes, 100 simulated agent-routing decisions, a 1,000-task authenticated dispatch simulation, forced delay/crash/lease-expiration/cancellation/sandbox events, and a full remote-worker sample. The benchmark reports measured p50/p95/p99 latency for transport, verification, outbox enqueue/recovery, leases, remote execution, retry, and reassignment, together with throughput. These are local deterministic measurements, not production capacity promises.
+
+SQLite outbox/inbox and local lease stores are durable local infrastructure, not distributed consensus or a replicated cross-host authority. M15 makes no Byzantine fault-tolerance or consensus claim. Production release still requires shared durable task/graph state, a reviewed multi-host lease and delivery authority, TLS and secret management, node admission/revocation, chaos testing, resource quotas, and independent security review. See [`docs/milestone-15-distributed-runtime.md`](docs/milestone-15-distributed-runtime.md) for the complete design and limitations.
+
 ## License
 
 Apache-2.0. Independent implementation. Helix does not copy source code, branding, or proprietary architecture from other projects.
