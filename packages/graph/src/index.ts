@@ -163,14 +163,30 @@ async function runTask(
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       if (externalSignal?.aborted) {
-        return { taskId: task.id, status: 'cancelled', attempts, error: lastError, startedAt, finishedAt: new Date().toISOString() };
+        return {
+          taskId: task.id,
+          status: 'cancelled',
+          attempts,
+          error: lastError,
+          startedAt,
+          finishedAt: new Date().toISOString(),
+        };
       }
     } finally {
       externalSignal?.removeEventListener('abort', abortExternal);
       controllers.delete(task.id);
     }
   }
-  return { taskId: task.id, status: 'failed', attempts, error: lastError, startedAt, finishedAt: new Date().toISOString() };
+
+  const failed: TaskResult = {
+    taskId: task.id,
+    status: 'failed',
+    attempts,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    ...(lastError ? { error: lastError } : {}),
+  };
+  return failed;
 }
 
 async function withTimeout<T>(promise: Promise<T> | T, timeoutMs: number | undefined, controller: AbortController): Promise<T> {
