@@ -57,3 +57,4 @@ export class LearningEngine {
 }
 
 export * from './intelligence.js';
+export * from './queue.js';

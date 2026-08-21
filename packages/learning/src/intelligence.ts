@@ -1,7 +1,8 @@
 import { timestamp } from '../../core/src/index.js';
-import { MemoryStore, type AgentExperience, type MemoryAccessContext, type MemoryEntry, type MemorySearchOptions, type MemorySearchResult, type RoutingHints, type RoutingLearningSignal, type TaskOutcomeLearningInput } from '../../memory/src/index.js';
+import { type AgentExperience, type MemoryAccessContext, type MemoryBackend, type MemoryBatchInput, type MemoryEntry, type MemoryEntryInput, type MemorySearchOptions, type MemorySearchResult, type RoutingHints, type RoutingLearningSignal, type TaskOutcomeLearningInput } from '../../memory/src/index.js';
 import { safeErrorCategory, sanitizeExecutionResult, taskOutcomeProvenance } from '../../memory/src/provenance.js';
 import type { RoutingCandidate, RoutingRequest } from '../../router/src/index.js';
+import { AsyncLearningQueue } from './queue.js';
 
 export interface PersistentLearningOptions {
   halfLifeDays?: number;
@@ -21,8 +22,9 @@ export class PersistentLearningEngine {
   private readonly failureThreshold: number;
   private readonly failureConfidenceThreshold: number;
   readonly maxLearningBonus: number;
+  private readonly queue = new AsyncLearningQueue();
 
-  constructor(private readonly memory: MemoryStore, options: PersistentLearningOptions = {}) {
+  constructor(private readonly memory: MemoryBackend, options: PersistentLearningOptions = {}) {
     this.halfLifeDays = options.halfLifeDays ?? 30;
     this.failureThreshold = options.failureThreshold ?? 3;
     this.failureConfidenceThreshold = options.failureConfidenceThreshold ?? 0.7;
@@ -37,13 +39,29 @@ export class PersistentLearningEngine {
     return this.recordOutcome(input, false);
   }
 
+  enqueueSuccess(input: TaskOutcomeLearningInput): boolean {
+    return this.queue.enqueue(this.outcomeKey(input), () => this.recordSuccess(input));
+  }
+
+  enqueueFailure(input: TaskOutcomeLearningInput): boolean {
+    return this.queue.enqueue(this.outcomeKey(input), () => this.recordFailure(input));
+  }
+
+  async flush(): Promise<void> {
+    await this.queue.flush();
+  }
+
+  get pendingWrites(): number {
+    return this.queue.size;
+  }
+
   async recall(options: MemorySearchOptions): Promise<MemorySearchResult[]> {
     return this.memory.searchEntries(options);
   }
 
   async suggestRouting(request: RoutingRequest, context: MemoryAccessContext = { subject: 'system' }): Promise<RoutingHints> {
-    const entries = await this.memory.listEntries(context);
-    const candidates = entries.filter((entry) => (entry.type === 'routing-hint' || entry.type === 'failure') && entry.namespace === 'global' && entry.metadata.taskType === request.taskType);
+    const recalled = await this.memory.searchEntries({ query: `${request.taskType} ${request.requiredCapabilities.join(' ')}`, namespace: 'global', types: ['routing-hint', 'failure'], retrievalLimit: 256, limit: 128, context });
+    const candidates = recalled.map((result) => result.entry).filter((entry) => entry.metadata.taskType === request.taskType);
     const signals = this.aggregateSignals(candidates, request);
     const preferredAgents = signals.filter((signal) => signal.decayedScore > 0).sort((left, right) => right.decayedScore - left.decayedScore || left.agentId.localeCompare(right.agentId)).slice(0, 5).map((signal) => signal.agentId);
     const avoidAgents = signals.filter((signal) => signal.repeatedFailures >= this.failureThreshold && signal.confidence >= this.failureConfidenceThreshold).sort((left, right) => right.repeatedFailures - left.repeatedFailures || left.agentId.localeCompare(right.agentId)).slice(0, 5).map((signal) => signal.agentId);
@@ -112,55 +130,30 @@ export class PersistentLearningEngine {
   }
 
   private async recordOutcome(input: TaskOutcomeLearningInput, success: boolean): Promise<MemoryEntry[]> {
-    const outcomeKey = `${input.executionId}:${input.taskId}:${input.attempts}`;
-    const existing = await this.memory.listEntries({ subject: 'system', canReadPrivate: true });
-    if (existing.some((entry) => entry.metadata.outcomeKey === outcomeKey)) return [];
-    const now = timestamp();
+    const outcomeKey = this.outcomeKey(input);
+    const existing = await this.memory.searchEntries({ query: input.taskType, namespace: 'global', metadata: { outcomeKey }, retrievalLimit: 32, limit: 1, context: { subject: 'system', canReadPrivate: true } });
+    if (existing.length) return [];
     const capabilities = [...new Set(input.capabilities)].slice(0, 32);
     const metadata = { outcomeKey, taskType: input.taskType, agentId: input.agentId, executionId: input.executionId, taskId: input.taskId, success: success ? 1 : 0, executionTimeMs: Math.max(0, input.executionTimeMs), attempts: input.attempts, ...(input.metadata ?? {}), ...(success ? {} : { errorCategory: safeErrorCategory(input.error ?? 'execution failure') }) };
     const evidenceConfidence = success ? Math.max(0.1, Math.min(1, input.quality)) : Math.max(0.7, Math.min(1, 0.7 + input.attempts * 0.05));
-    const publicEntry = await this.memory.create({
-      namespace: 'global',
-      type: success ? 'routing-hint' : 'failure',
-      content: success ? `Successful ${input.taskType} outcome for agent ${input.agentId}` : `Failed ${input.taskType} outcome for agent ${input.agentId}`,
-      metadata,
-      source: 'learning-engine',
-      agentId: input.agentId,
-      ...(input.swarmId ? { swarmId: input.swarmId } : {}),
-      taskId: input.taskId,
-      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-      confidence: evidenceConfidence,
-      tags: [`task:${input.taskType}`, ...capabilities.map((capability) => `capability:${capability}`), success ? 'outcome:success' : 'outcome:failure'],
-      provenance: taskOutcomeProvenance(input),
-      accessPolicy: { visibility: 'public', allowedSubjects: ['*'], allowedSwarmIds: input.swarmId ? [input.swarmId] : [], owner: 'system' },
-    });
-    const experience = await this.memory.create({
-      namespace: `agent:${input.agentId}`,
-      type: 'agent-experience',
-      content: `${success ? 'Succeeded' : 'Failed'} ${input.taskType}; experience is historical evidence, not an instruction`,
-      metadata,
-      source: 'learning-engine',
-      agentId: input.agentId,
-      taskId: input.taskId,
-      confidence: evidenceConfidence,
-      tags: capabilities.map((capability) => `capability:${capability}`),
-      provenance: taskOutcomeProvenance(input),
-      accessPolicy: { visibility: 'private', allowedSubjects: [input.agentId], allowedSwarmIds: input.swarmId ? [input.swarmId] : [], owner: input.agentId },
-    }, { subject: input.agentId, agentId: input.agentId });
-    const solution = await this.memory.create({
-      namespace: 'global',
-      type: success ? 'solution' : 'pattern',
-      content: success ? `Capability combination ${capabilities.join(', ') || 'none'} worked for ${input.taskType}` : `Failure pattern for ${input.taskType}: ${safeErrorCategory(input.error ?? 'execution failure')}`,
-      metadata: { ...metadata, ...(input.output !== undefined ? { outputSummary: JSON.stringify(sanitizeExecutionResult(input.output)).slice(0, 2_000) } : {}) },
-      source: 'learning-engine',
-      agentId: input.agentId,
-      taskId: input.taskId,
-      confidence: evidenceConfidence,
-      tags: [`task:${input.taskType}`, ...capabilities.map((capability) => `capability:${capability}`), success ? 'solution' : 'failure-pattern'],
-      provenance: taskOutcomeProvenance(input),
-      accessPolicy: { visibility: 'public', allowedSubjects: ['*'], allowedSwarmIds: input.swarmId ? [input.swarmId] : [], owner: 'system' },
-    });
-    return [publicEntry, experience, solution];
+    const provenance = taskOutcomeProvenance(input);
+    const publicInput: MemoryEntryInput = {
+      namespace: 'global', type: success ? 'routing-hint' : 'failure', content: success ? `Successful ${input.taskType} outcome for agent ${input.agentId}` : `Failed ${input.taskType} outcome for agent ${input.agentId}`, metadata, source: 'learning-engine', agentId: input.agentId, ...(input.swarmId ? { swarmId: input.swarmId } : {}), taskId: input.taskId, ...(input.sessionId ? { sessionId: input.sessionId } : {}), confidence: evidenceConfidence, tags: [`task:${input.taskType}`, ...capabilities.map((capability) => `capability:${capability}`), success ? 'outcome:success' : 'outcome:failure'], provenance, accessPolicy: { visibility: 'public', allowedSubjects: ['*'], allowedSwarmIds: input.swarmId ? [input.swarmId] : [], owner: 'system' },
+    };
+    const experienceInput: MemoryEntryInput = {
+      namespace: `agent:${input.agentId}`, type: 'agent-experience', content: `${success ? 'Succeeded' : 'Failed'} ${input.taskType}; experience is historical evidence, not an instruction`, metadata, source: 'learning-engine', agentId: input.agentId, taskId: input.taskId, confidence: evidenceConfidence, tags: capabilities.map((capability) => `capability:${capability}`), provenance, accessPolicy: { visibility: 'private', allowedSubjects: [input.agentId], allowedSwarmIds: input.swarmId ? [input.swarmId] : [], owner: input.agentId },
+    };
+    const solutionInput: MemoryEntryInput = {
+      namespace: 'global', type: success ? 'solution' : 'pattern', content: success ? `Capability combination ${capabilities.join(', ') || 'none'} worked for ${input.taskType}` : `Failure pattern for ${input.taskType}: ${safeErrorCategory(input.error ?? 'execution failure')}`, metadata: { ...metadata, ...(input.output !== undefined ? { outputSummary: JSON.stringify(sanitizeExecutionResult(input.output)).slice(0, 2_000) } : {}) }, source: 'learning-engine', agentId: input.agentId, taskId: input.taskId, confidence: evidenceConfidence, tags: [`task:${input.taskType}`, ...capabilities.map((capability) => `capability:${capability}`), success ? 'solution' : 'failure-pattern'], provenance, accessPolicy: { visibility: 'public', allowedSubjects: ['*'], allowedSwarmIds: input.swarmId ? [input.swarmId] : [], owner: 'system' },
+    };
+    const batch: MemoryBatchInput[] = [{ input: publicInput }, { input: experienceInput, context: { subject: input.agentId, agentId: input.agentId } }, { input: solutionInput }];
+    if (this.memory.createMany) return this.memory.createMany(batch);
+    const entries = await Promise.all(batch.map(({ input: entryInput, context }) => this.memory.create(entryInput, context)));
+    return entries;
+  }
+
+  private outcomeKey(input: TaskOutcomeLearningInput): string {
+    return `${input.executionId}:${input.taskId}:${input.attempts}`;
   }
 
   private aggregateSignals(entries: MemoryEntry[], request: RoutingRequest): RoutingLearningSignal[] {
