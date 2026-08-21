@@ -1,6 +1,6 @@
 import { EventStore } from '../../durable/src/index.js';
 import { AgentId, timestamp } from '../../core/src/index.js';
-import type { RoutingDecision, RoutingRequest, RoutingStrategy } from './index.js';
+import type { RoutingDecision, RoutingRequest } from './index.js';
 
 export interface RouteOutcome {
   success: boolean;
@@ -40,7 +40,6 @@ export class RoutingEvidenceStore {
       taskId: input.taskId,
       agentId: input.decision.agentId,
       payload: evidence,
-      idempotencyKey: `route:${input.executionId ?? 'none'}:${input.taskId ?? 'none'}:${input.decision.agentId}:${input.decision.strategy}`,
     });
   }
 
@@ -55,9 +54,9 @@ export class RoutingEvidenceStore {
     for (const event of events) {
       const agentId = event.agentId!;
       const evidence = event.payload as RouteEvidence;
-      const current = summary.get(agentId) ?? { samples: 0, successRate: 0, quality: 0, latencyMs: 0, costUsd: 0 };
       const outcome = evidence.outcome;
       if (!outcome) continue;
+      const current = summary.get(agentId) ?? { samples: 0, successRate: 0, quality: 0, latencyMs: 0, costUsd: 0 };
       current.samples += 1;
       current.successRate += outcome.success ? 1 : 0;
       current.quality += outcome.quality;
