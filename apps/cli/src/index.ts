@@ -39,6 +39,8 @@ function help(): void {
   helix orchestrate status <orchestrationId> [--json]
   helix orchestrate cancel <orchestrationId> [--json]
   helix swarm create --goal "..." [--topology adaptive] [--max-agents 12] [--json]
+  helix swarms list [--json]
+  helix swarms inspect <id> [--json]
   helix swarm status <swarmId> [--json]
   helix swarm members <swarmId> [--json]
   helix swarm scale <swarmId> <count> [--json]
@@ -64,6 +66,18 @@ function help(): void {
   helix federation deadletters [--json]
   helix federation trace <taskId> [--json]
   helix federation leases [--json]
+  helix status [--json]
+  helix metrics [--json|--prometheus]
+  helix events tail [--json]
+  helix trace <execution-id> [--json]
+  helix trace list [--json]
+  helix trace export <execution-id> [--json]
+  helix doctor [--json]
+  helix session <create|status|stop|inspect|execute> [args] [--json]
+  helix nodes <list|status> [id] [--json]
+  helix tasks <list|inspect|cancel> [id] [--json]
+  helix executions <list|inspect> [id] [--json]
+  helix providers <list|status|test> [--json]
   helix mcp serve [--json]
   helix mcp doctor [--json]
   helix mcp tools [--json]
@@ -91,7 +105,18 @@ async function main(): Promise<void> {
     console.log(`Tokens:    ${execution.usage.tokens}`);
     return;
   }
-  if (command === 'agents') return print({ agents: runtime.agents.list() });
+  if (command === 'status') return print(await runtime.controlPlane.snapshot());
+  if (command === 'metrics') return print(args.includes('--prometheus') ? runtime.controlPlane.metrics.prometheus() : runtime.controlPlane.metrics.snapshot());
+  if (command === 'doctor') return print(await runtime.controlPlane.doctor.run());
+  if (command === 'events') { if (args[1] === 'tail' || !args[1]) return print({ events: runtime.controlPlane.listEvents({ limit: Number(option('--limit') ?? 100) }) }); return print({ events: await runtime.events.read() }); }
+  if (command === 'trace') { const action = args[1]; if (action === 'list') return print({ traces: runtime.controlPlane.listTraces(Number(option('--limit') ?? 100)) }); if (action === 'export') { if (!args[2]) throw new Error('Usage: helix trace export <execution-id>'); return print(runtime.controlPlane.traces.export(args[2])); } if (!action) throw new Error('Usage: helix trace <execution-id>'); return print(await runtime.controlPlane.trace(action)); }
+  if (command === 'agents') { if (args[1] === 'status' && args[2]) return print(runtime.agents.get(args[2])); return print({ agents: runtime.agents.list() }); }
+  if (command === 'nodes') { const action = args[1] ?? 'list'; if (action === 'list') return print({ nodes: runtime.federation.listNodes() }); if (action === 'status' && args[2]) return print(runtime.federation.getNode(args[2])); throw new Error('Usage: helix nodes <list|status> [id]'); }
+  if (command === 'tasks') { const action = args[1] ?? 'list'; if (action === 'list') return print({ tasks: runtime.listTasks() }); if (action === 'inspect' && args[2]) return print(runtime.getTask(args[2])); if (action === 'cancel' && args[2]) return print(await runtime.federation.cancel(args[2])); throw new Error('Usage: helix tasks <list|inspect|cancel> [id]'); }
+  if (command === 'executions') { const action = args[1] ?? 'list'; if (action === 'list') return print({ executions: runtime.listExecutions() }); if (action === 'inspect' && args[2]) return print(runtime.getExecution(args[2])); throw new Error('Usage: helix executions <list|inspect> [id]'); }
+  if (command === 'providers') { const action = args[1] ?? 'list'; if (action === 'list' || action === 'status') return print({ providers: await runtime.controlPlane.providerStatus(), models: runtime.controlPlane.models.list() }); if (action === 'test') return print(await runtime.controlPlane.providerStatus()); throw new Error('Usage: helix providers <list|status|test>'); }
+  if (command === 'session') { const action = args[1] ?? 'list'; if (action === 'create') { const goal = args.slice(2).filter((arg) => arg !== '--json').join(' ').trim(); if (!goal) throw new Error('Usage: helix session create "<goal>"'); return print(runtime.controlPlane.sessions.create({ goal })); } if (action === 'list') return print({ sessions: runtime.controlPlane.sessions.list() }); if (action === 'status' || action === 'inspect') { if (!args[2]) throw new Error(`Usage: helix session ${action} <id>`); return print(runtime.controlPlane.sessions.get(args[2])); } if (action === 'stop') { if (!args[2]) throw new Error('Usage: helix session stop <id>'); return print(await runtime.controlPlane.sessions.stop(args[2])); } if (action === 'execute') { if (!args[2]) throw new Error('Usage: helix session execute <id>'); return print(await runtime.controlPlane.sessions.execute(args[2])); } throw new Error('Usage: helix session <create|list|status|stop|inspect|execute>'); }
+
   if (command === 'events') return print({ events: await runtime.events.read() });
   if (command === 'execution') {
     const executionId = args[1];
@@ -148,6 +173,7 @@ async function main(): Promise<void> {
     if (action === 'status' || action === 'cancel') { const orchestrationId = args[2]; if (!orchestrationId) throw new Error(`Usage: helix orchestrate ${action} <orchestrationId>`); return print(action === 'status' ? await orchestrator.status(orchestrationId) : await orchestrator.cancel(orchestrationId)); }
     const titleIndex = args.indexOf('--title'); const descriptionIndex = args.indexOf('--description'); const approvalIndex = args.indexOf('--approved-by'); const title = titleIndex >= 0 ? args[titleIndex + 1] : args.slice(1).filter((arg) => !arg.startsWith('--')).join(' '); const description = descriptionIndex >= 0 ? args[descriptionIndex + 1] : title; const approvedBy = approvalIndex >= 0 ? args[approvalIndex + 1] : undefined; if (!title) throw new Error('Usage: helix orchestrate --title "..." --description "..."'); return print(await orchestrator.run({ title, ...(typeof description === 'string' ? { description } : {}) }, typeof approvedBy === 'string' ? { approvedBy } : undefined));
   }
+  if (command === 'swarms') { const action = args[1] ?? 'list'; if (action === 'list') return print({ swarms: runtime.swarms.list() }); if (action === 'inspect' && args[2]) { const swarm = runtime.swarms.get(args[2]); return print({ swarm, health: runtime.swarms.health(args[2]) }); } throw new Error('Usage: helix swarms <list|inspect> [id]'); }
   if (command === 'swarm') {
     const orchestrator = runtime.createOrchestrator({ subject: process.env.HELIX_SUBJECT ?? 'cli-user' });
     const action = args[1];
