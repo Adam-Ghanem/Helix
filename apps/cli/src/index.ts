@@ -18,6 +18,7 @@ function print(value: unknown): void {
   else if (typeof value === 'string') console.log(value);
   else console.log(JSON.stringify(value, null, 2));
 }
+function option(name: string): string | undefined { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; }
 
 function help(): void {
   console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix sandbox doctor [--json]\n  helix sandbox run [--docker] [--network none] [--memory MB] [--timeout 10s] -- <command> [args...]\n  helix sandbox status [--json]\n  helix sandbox destroy <id> [--json]
@@ -37,6 +38,16 @@ function help(): void {
   helix orchestrate --title "..." --description "..." [--approved-by <actor>] [--json]
   helix orchestrate status <orchestrationId> [--json]
   helix orchestrate cancel <orchestrationId> [--json]
+  helix swarm create --goal "..." [--topology adaptive] [--max-agents 12] [--json]
+  helix swarm status <swarmId> [--json]
+  helix swarm members <swarmId> [--json]
+  helix swarm scale <swarmId> <count> [--json]
+  helix swarm rebalance <swarmId> [--json]
+  helix swarm delegate <swarmId> <taskId> <capability> [--target <agent|ROLE|swarm>] [--json]
+  helix swarm handoff <swarmId> <taskId> <fromAgentId> <toAgentId> --reason "..." [--json]
+  helix swarm graph <swarmId> [--json]
+  helix swarm consensus <swarmId> [--json]
+  helix swarm explain <swarmId> [--json]
   helix mcp serve [--json]
   helix mcp doctor [--json]
   helix mcp tools [--json]
@@ -121,13 +132,29 @@ async function main(): Promise<void> {
     if (action === 'status' || action === 'cancel') { const orchestrationId = args[2]; if (!orchestrationId) throw new Error(`Usage: helix orchestrate ${action} <orchestrationId>`); return print(action === 'status' ? await orchestrator.status(orchestrationId) : await orchestrator.cancel(orchestrationId)); }
     const titleIndex = args.indexOf('--title'); const descriptionIndex = args.indexOf('--description'); const approvalIndex = args.indexOf('--approved-by'); const title = titleIndex >= 0 ? args[titleIndex + 1] : args.slice(1).filter((arg) => !arg.startsWith('--')).join(' '); const description = descriptionIndex >= 0 ? args[descriptionIndex + 1] : title; const approvedBy = approvalIndex >= 0 ? args[approvalIndex + 1] : undefined; if (!title) throw new Error('Usage: helix orchestrate --title "..." --description "..."'); return print(await orchestrator.run({ title, ...(typeof description === 'string' ? { description } : {}) }, typeof approvedBy === 'string' ? { approvedBy } : undefined));
   }
+  if (command === 'swarm') {
+    const orchestrator = runtime.createOrchestrator({ subject: process.env.HELIX_SUBJECT ?? 'cli-user' });
+    const action = args[1];
+    if (action === 'create') { const goalText = option('--goal') ?? args.slice(2).filter((arg) => !arg.startsWith('--')).join(' ').trim(); if (!goalText) throw new Error('Usage: helix swarm create --goal "..."'); const goal = await orchestrator.createGoal({ title: option('--name') ?? goalText.slice(0, 80), description: goalText }); const swarm = await orchestrator.createSwarm({ name: option('--name') ?? 'helix-cli-swarm', goalId: goal.id, ...(option('--topology') ? { topology: option('--topology') as import('../../../packages/swarm/src/index.js').DynamicSwarmTopology } : {}), ...(option('--max-agents') ? { maxAgents: Number(option('--max-agents')) } : {}) }); return print({ goal, swarm }); }
+    const swarmId = args[2]; if (!swarmId) throw new Error('Usage: helix swarm <status|members|scale|rebalance|delegate|handoff|graph|consensus|explain> <swarmId>');
+    if (action === 'status') return print(orchestrator.swarmStatus(swarmId));
+    if (action === 'members') return print({ swarmId, members: orchestrator.swarmStatus(swarmId).members });
+    if (action === 'scale') { const count = Number(args[3]); if (!Number.isInteger(count)) throw new Error('Usage: helix swarm scale <swarmId> <count>'); return print(await orchestrator.scaleSwarm(swarmId, count)); }
+    if (action === 'rebalance') return print(await orchestrator.rebalanceSwarm(swarmId, option('--reason')));
+    if (action === 'delegate') { const taskId = args[3]; const capability = args[4]; if (!taskId || !capability) throw new Error('Usage: helix swarm delegate <swarmId> <taskId> <capability>'); return print(await orchestrator.delegateToSwarm(swarmId, { id: taskId, title: taskId, requiredCapabilities: [capability], dependencies: [], parallelizable: true }, option('--target') as import('../../../packages/core/src/index.js').AgentId | import('../../../packages/swarm/src/index.js').SwarmRole | 'swarm' ?? 'swarm')); }
+    if (action === 'handoff') { const taskId = args[3]; const fromAgentId = args[4]; const toAgentId = args[5]; const reason = option('--reason'); if (!taskId || !fromAgentId || !toAgentId || !reason) throw new Error('Usage: helix swarm handoff <swarmId> <taskId> <fromAgentId> <toAgentId> --reason "..."'); return print(await orchestrator.handoffInSwarm(swarmId, taskId, fromAgentId, toAgentId, reason)); }
+    if (action === 'graph') return print(orchestrator.swarmCollaboration(swarmId));
+    if (action === 'consensus') return print({ swarmId, message: 'Provide votes through the SDK or governed MCP surface.' });
+    if (action === 'explain') return print(orchestrator.explainSwarm(swarmId));
+    throw new Error('Usage: helix swarm <create|status|members|scale|rebalance|delegate|handoff|graph|consensus|explain>');
+  }
   if (command === 'mcp') {
     const mcp = new HelixMcpServer(runtime, { actorRoles: { 'mcp-user': 'viewer', 'mcp-operator': 'operator', 'mcp-admin': 'admin' } });
     const action = args[1] ?? 'doctor';
     if (action === 'tools') return print({ count: mcp.registry.count(), tools: await mcp.listTools(), familyCounts: MCP_TOOL_FAMILY_COUNTS });
     if (action === 'resources') return print({ resources: mcp.resources });
     if (action === 'prompts') return print({ prompts: mcp.prompts });
-    if (action === 'doctor') return print({ server: 'helix-m11', sdk: 'official @modelcontextprotocol/sdk', tools: mcp.registry.count(), resources: mcp.resources.length, prompts: mcp.prompts.length, transports: ['stdio', 'streamable-http'], familyCounts: MCP_TOOL_FAMILY_COUNTS });
+    if (action === 'doctor') return print({ server: 'helix-m13', sdk: 'official @modelcontextprotocol/sdk', tools: mcp.registry.count(), resources: mcp.resources.length, prompts: mcp.prompts.length, transports: ['stdio', 'streamable-http'], familyCounts: MCP_TOOL_FAMILY_COUNTS });
     if (action === 'serve') return mcp.connectStdio();
     throw new Error('Usage: helix mcp <serve|doctor|tools|resources|prompts>');
   }
