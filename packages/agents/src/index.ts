@@ -7,34 +7,38 @@ export interface AgentTypeDefinition {
 }
 
 export const AGENT_TYPES: readonly AgentTypeDefinition[] = [
-  ['architect', 'Architecture analysis', ['architecture', 'analysis']],
-  ['planner', 'Task planning', ['planning', 'analysis']],
-  ['coder', 'Implementation', ['coding', 'typescript', 'python']],
-  ['reviewer', 'Code and result review', ['review', 'quality']],
-  ['tester', 'Validation and testing', ['testing', 'quality']],
-  ['debugger', 'Failure diagnosis', ['debugging', 'analysis']],
-  ['security-architect', 'Security architecture', ['security', 'threat-modeling', 'architecture']],
-  ['researcher', 'Evidence gathering', ['research', 'analysis']],
-  ['performance-engineer', 'Performance engineering', ['performance', 'profiling', 'optimization']],
-  ['memory-specialist', 'Memory and retrieval', ['memory', 'retrieval', 'knowledge']],
-  ['analyst', 'Structured analysis', ['analysis', 'reporting']],
-  ['backend', 'Backend engineering', ['coding', 'backend']],
-  ['frontend', 'Frontend engineering', ['coding', 'frontend']],
-  ['database', 'Data systems', ['coding', 'database']],
-  ['devops', 'Operations', ['devops', 'deployment']],
-  ['documentation', 'Technical documentation', ['documentation', 'writing']],
-  ['dependency-auditor', 'Dependency review', ['security', 'dependencies']],
-  ['incident-responder', 'Incident handling', ['security', 'operations']],
-  ['release-manager', 'Release verification', ['release', 'verification']],
-  ['qa-engineer', 'Quality engineering', ['testing', 'quality', 'automation']],
-  ['api-engineer', 'API engineering', ['coding', 'api', 'backend']],
-  ['mcp-specialist', 'MCP integration', ['mcp', 'tools', 'integration']],
-  ['workflow-engineer', 'Workflow design', ['workflow', 'orchestration', 'planning']],
-  ['cost-optimizer', 'Cost optimization', ['cost', 'optimization', 'analysis']],
-  ['compliance-auditor', 'Compliance auditing', ['compliance', 'audit', 'security']],
-] as const;
+  { type: 'architect', role: 'Architecture analysis', capabilities: ['architecture', 'analysis'] },
+  { type: 'planner', role: 'Task planning', capabilities: ['planning', 'analysis'] },
+  { type: 'coder', role: 'Implementation', capabilities: ['coding', 'typescript', 'python'] },
+  { type: 'reviewer', role: 'Code and result review', capabilities: ['review', 'quality'] },
+  { type: 'tester', role: 'Validation and testing', capabilities: ['testing', 'quality'] },
+  { type: 'debugger', role: 'Failure diagnosis', capabilities: ['debugging', 'analysis'] },
+  { type: 'security-architect', role: 'Security architecture', capabilities: ['security', 'threat-modeling', 'architecture'] },
+  { type: 'researcher', role: 'Evidence gathering', capabilities: ['research', 'analysis'] },
+  { type: 'performance-engineer', role: 'Performance engineering', capabilities: ['performance', 'profiling', 'optimization'] },
+  { type: 'memory-specialist', role: 'Memory and retrieval', capabilities: ['memory', 'retrieval', 'knowledge'] },
+  { type: 'analyst', role: 'Structured analysis', capabilities: ['analysis', 'reporting'] },
+  { type: 'backend', role: 'Backend engineering', capabilities: ['coding', 'backend'] },
+  { type: 'frontend', role: 'Frontend engineering', capabilities: ['coding', 'frontend'] },
+  { type: 'database', role: 'Data systems', capabilities: ['coding', 'database'] },
+  { type: 'devops', role: 'Operations', capabilities: ['devops', 'deployment'] },
+  { type: 'documentation', role: 'Technical documentation', capabilities: ['documentation', 'writing'] },
+  { type: 'dependency-auditor', role: 'Dependency review', capabilities: ['security', 'dependencies'] },
+  { type: 'incident-responder', role: 'Incident handling', capabilities: ['security', 'operations'] },
+  { type: 'release-manager', role: 'Release verification', capabilities: ['release', 'verification'] },
+  { type: 'qa-engineer', role: 'Quality engineering', capabilities: ['testing', 'quality', 'automation'] },
+  { type: 'api-engineer', role: 'API engineering', capabilities: ['coding', 'api', 'backend'] },
+  { type: 'mcp-specialist', role: 'MCP integration', capabilities: ['mcp', 'tools', 'integration'] },
+  { type: 'workflow-engineer', role: 'Workflow design', capabilities: ['workflow', 'orchestration', 'planning'] },
+  { type: 'cost-optimizer', role: 'Cost optimization', capabilities: ['cost', 'optimization', 'analysis'] },
+  { type: 'compliance-auditor', role: 'Compliance auditing', capabilities: ['compliance', 'audit', 'security'] },
+];
 
-const CATALOG: AgentTypeDefinition[] = AGENT_TYPES.map(([type, role, capabilities]) => ({ type, role, capabilities: [...capabilities] }));
+const CATALOG: AgentTypeDefinition[] = AGENT_TYPES.map((definition) => ({
+  type: definition.type,
+  role: definition.role,
+  capabilities: [...definition.capabilities],
+}));
 
 function initialHealth(): AgentHealth {
   return { successRate: 0.5, failureRate: 0, latencyMs: 1_000, tokenConsumption: 0, toolFailures: 0, timeouts: 0, retries: 0, qualityScore: 0.5, samples: 0 };
