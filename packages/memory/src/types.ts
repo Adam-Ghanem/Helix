@@ -12,6 +12,7 @@ export interface MemoryProvenance {
   swarmId?: string;
   taskId?: TaskId;
   executionId?: string;
+  sourceNodeId?: string;
 }
 
 export interface MemoryAccessPolicy {

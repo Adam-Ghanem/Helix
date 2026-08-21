@@ -16,7 +16,8 @@ import { ToolRegistry, PublicToolDefinition } from '../../tools/src/index.js';
 import { registerHelixMemoryTools } from '../../mcp/src/index.js';
 import { HelixOrchestrator, type OrchestratorOptions } from '../../intelligence/src/index.js';
 import { DynamicSwarmManager } from '../../swarm/src/index.js';
-import { FederationCoordinator } from '../../federation/src/index.js';
+import { FederationCoordinator, FederationNodeRuntime, HmacMessageSigner, HmacMessageVerifier, SqliteInboxStore, SqliteOutboxStore } from '../../federation/src/index.js';
+import type { FederationExecutionOutcome, FederationRuntimeOptions, FederationSecurityContext, FederationTimeoutKind } from '../../federation/src/index.js';
 
 export interface ProviderResult {
   output: unknown;
@@ -101,12 +102,45 @@ export interface RuntimeOptions {
   learning?: PersistentLearningEngine;
   learningAsync?: boolean;
   federation?: FederationCoordinator;
+  federationKey?: { keyId: string; secret: string };
+  federationRuntime?: FederationRuntimeOptions;
 }
 
 export interface ExecutionView {
   execution: ExecutionRecord;
   tasks: TaskRecord[];
   events: EventEnvelope[];
+}
+
+export interface FederatedRuntimeTaskInput {
+  taskId: string;
+  title: string;
+  description?: string;
+  goal?: string;
+  requiredCapabilities: string[];
+  priority?: number;
+  correlationId: string;
+  traceId: string;
+  securityContext: FederationSecurityContext;
+  authorizationContext: Record<string, string>;
+  executionTimeoutMs?: number;
+  sandbox?: SandboxExecutionRequest;
+  signal?: AbortSignal;
+}
+
+export interface FederatedOutcomeLearningInput {
+  executionId: string;
+  taskId: string;
+  taskType: string;
+  agentId: string;
+  sourceNodeId: string;
+  attemptId: string;
+  capabilities: string[];
+  success: boolean;
+  quality: number;
+  executionTimeMs: number;
+  output?: unknown;
+  error?: string;
 }
 
 export class HelixRuntime {
@@ -122,9 +156,13 @@ export class HelixRuntime {
   readonly learning: PersistentLearningEngine;
   readonly swarms: DynamicSwarmManager;
   readonly federation: FederationCoordinator;
+  readonly federationRuntime: FederationNodeRuntime;
   readonly learningAsync: boolean;
   private readonly executions = new Map<string, ExecutionRecord>();
   private readonly graphs = new Map<string, TaskGraph>();
+  private readonly federatedInputs = new Map<string, FederatedRuntimeTaskInput>();
+  private readonly federatedTaskExecutions = new Map<string, string>();
+  private readonly federatedControllers = new Map<string, AbortController>();
   private initialized = false;
 
   constructor(options: RuntimeOptions) {
@@ -140,7 +178,13 @@ export class HelixRuntime {
     this.learning = options.learning ?? new PersistentLearningEngine(this.memory);
     this.swarms = new DynamicSwarmManager({ agents: this.agents, router: this.router, scheduler: this.scheduler, memory: this.memory, subject: 'runtime', eventSink: async (event) => { await this.events.append({ type: event.type, payload: { swarmId: event.swarmId, ...event.payload } }); } });
     const localCapabilities = [...new Set(this.agents.list().flatMap((agent) => agent.capabilities))];
-    this.federation = options.federation ?? new FederationCoordinator({ localNode: { name: 'helix-local', endpoint: 'in-memory://local', role: 'hybrid', capabilities: localCapabilities, status: 'healthy', trustLevel: 'ADMIN', metadata: { runtime: 'helix' } }, eventSink: async (event) => { await this.events.append({ type: event.type, payload: event.payload }); } });
+    if (options.federation) this.federation = options.federation;
+    else {
+      const signer = options.federationKey ? new HmacMessageSigner(options.federationKey.secret, options.federationKey.keyId) : undefined;
+      const verifier = options.federationKey ? new HmacMessageVerifier(options.federationKey.secret, undefined, 30_000, Date.now, options.federationKey.keyId) : undefined;
+      this.federation = new FederationCoordinator({ localNode: { name: 'helix-local', endpoint: 'in-memory://local', role: 'hybrid', capabilities: localCapabilities, status: 'healthy', trustLevel: 'ADMIN', metadata: { runtime: 'helix' } }, eventSink: async (event) => { await this.events.append({ type: event.type, payload: event.payload }); }, inbox: new SqliteInboxStore(join(options.dataDirectory, 'helix.federation.sqlite')), outbox: new SqliteOutboxStore(join(options.dataDirectory, 'helix.federation.sqlite')), ...(signer ? { signer } : {}), ...(verifier ? { verifier } : {}) });
+    }
+    this.federationRuntime = new FederationNodeRuntime({ runtime: this, coordinator: this.federation, ...(options.federationRuntime ?? {}) });
     this.learningAsync = options.learningAsync ?? true;
   }
 
@@ -151,6 +195,52 @@ export class HelixRuntime {
     await this.sandbox.init();
     for (const event of await this.events.read()) this.rebuild(event);
     this.initialized = true;
+  }
+
+  async executeFederatedTask(input: FederatedRuntimeTaskInput): Promise<FederationExecutionOutcome> {
+    await this.init();
+    const executionId = id('fed-ex');
+    const task: TaskRecord = { id: input.taskId, executionId, title: input.title, description: input.description ?? input.title, dependencies: [], status: 'ready', attempts: 0 };
+    const execution: ExecutionRecord = { id: executionId, goal: input.goal ?? input.title, status: 'running', createdAt: timestamp(), updatedAt: timestamp(), taskIds: [task.id], budget: withDefaultBudget({ maxAgents: 1, maxTasks: 1, ...(input.executionTimeoutMs !== undefined ? { maxRuntimeMs: input.executionTimeoutMs } : {}) }), usage: { agents: 0, tasks: 1, toolCalls: 0, tokens: 0, costUsd: 0, runtimeMs: 0, delegationDepth: 0 } };
+    this.executions.set(execution.id, execution);
+    this.graphs.set(execution.id, new TaskGraph([task]));
+    this.federatedInputs.set(task.id, input);
+    this.federatedTaskExecutions.set(task.id, execution.id);
+    const controller = new AbortController();
+    const signal = input.signal;
+    const abortForwarder = () => controller.abort();
+    if (signal) { if (signal.aborted) controller.abort(); else signal.addEventListener('abort', abortForwarder, { once: true }); }
+    this.federatedControllers.set(task.id, controller);
+    const startedAt = timestamp();
+    await this.events.append({ type: 'federated.execution.started', executionId, taskId: task.id, correlationId: input.correlationId, payload: { taskId: task.id, nodeId: input.authorizationContext.nodeId ?? 'local', correlationId: input.correlationId, traceId: input.traceId, securityContext: input.securityContext, authorizationContext: input.authorizationContext } });
+    await this.events.append({ type: 'task.created', executionId, taskId: task.id, correlationId: input.correlationId, payload: task, idempotencyKey: `federated:${task.id}:created` });
+    let timeoutKind: FederationTimeoutKind | undefined;
+    const executionPromise = this.runExecution(execution.id);
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    const executionTimeoutMs = input.executionTimeoutMs;
+    const timeoutPromise = executionTimeoutMs === undefined ? undefined : new Promise<void>((resolve) => { timeoutHandle = setTimeout(() => { timeoutKind = 'EXECUTION_TIMEOUT'; controller.abort(); resolve(); }, Math.max(1, executionTimeoutMs)); });
+    if (timeoutPromise) await Promise.race([executionPromise, timeoutPromise]); else await executionPromise;
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    if (controller.signal.aborted && execution.status === 'running') { execution.status = 'cancelled'; execution.error = timeoutKind ? 'federated task execution timed out' : 'federated task cancelled'; execution.updatedAt = timestamp(); await this.events.append({ type: timeoutKind ? 'federated.execution.timeout' : 'federated.execution.cancelled', executionId, taskId: task.id, correlationId: input.correlationId, payload: { taskId: task.id, traceId: input.traceId, timeout: timeoutKind } }); }
+    if (signal) signal.removeEventListener('abort', abortForwarder);
+    const finalTask = this.graphs.get(execution.id)!.get(task.id);
+    const assignedAgentId = finalTask.assignedAgentId;
+    const completedAt = timestamp();
+    const status: FederationExecutionOutcome['status'] = execution.status === 'completed' && finalTask.status === 'completed' ? 'completed' : execution.status === 'cancelled' ? 'cancelled' : 'failed';
+    const error = status === 'completed' ? undefined : execution.error ?? finalTask.error ?? (status === 'cancelled' ? 'federated task cancelled' : 'federated task failed');
+    const outcome: FederationExecutionOutcome = { taskId: task.id, attemptId: `${task.id}:attempt:${finalTask.attempts}`, nodeId: input.authorizationContext.nodeId ?? 'local', status, ...(status === 'completed' ? { output: structuredClone(finalTask.result) } : {}), ...(error ? { error } : {}), ...(timeoutKind ? { timeout: timeoutKind } : {}), startedAt, completedAt, provenance: { ...(input.authorizationContext.sourceNodeId ? { sourceNodeId: input.authorizationContext.sourceNodeId } : {}), ...(assignedAgentId ? { agentId: assignedAgentId } : {}), taskId: task.id, attemptId: `${task.id}:attempt:${finalTask.attempts}`, timestamp: completedAt } };
+    this.federatedControllers.delete(task.id); this.federatedInputs.delete(task.id); this.federatedTaskExecutions.delete(task.id);
+    return outcome;
+  }
+
+  async cancelFederatedTask(taskId: string): Promise<FederationExecutionOutcome | undefined> {
+    const controller = this.federatedControllers.get(taskId);
+    const executionId = this.federatedTaskExecutions.get(taskId);
+    if (!controller || !executionId) return undefined;
+    controller.abort();
+    const execution = this.executions.get(executionId);
+    if (execution && execution.status === 'running') { execution.status = 'cancelled'; execution.error = 'federated task cancelled'; execution.updatedAt = timestamp(); await this.events.append({ type: 'federated.execution.cancelled', executionId, taskId, payload: { taskId } }); }
+    return undefined;
   }
 
   async execute(input: ExecutionInput): Promise<ExecutionRecord> {
@@ -193,24 +283,29 @@ export class HelixRuntime {
     return structuredClone(completed);
   }
 
-  private async executeSandboxRequest(request: SandboxExecutionRequest, executionId: string) {
+  private async executeSandboxRequest(request: SandboxExecutionRequest, executionId: string, agentId?: string, signal?: AbortSignal) {
     if (!request.command) throw new Error('Sandbox command is required when sandboxing is enabled');
     const workspace = request.policy?.workspacePath ?? process.cwd();
     const defaults = defaultSandboxPolicy(workspace);
     const policy: SandboxPolicy = { ...defaults, ...request.policy, allowedExecutables: request.policy?.allowedExecutables ?? defaults.allowedExecutables, allowedPaths: request.policy?.allowedPaths ?? defaults.allowedPaths, deniedPaths: request.policy?.deniedPaths ?? defaults.deniedPaths, environmentAllowlist: request.policy?.environmentAllowlist ?? defaults.environmentAllowlist };
-    const created = await this.sandbox.create({ policy, executionId, ...(request.backend ? { backend: request.backend } : {}) });
+    const created = await this.sandbox.create({ policy, executionId, ...(agentId ? { agentId } : {}), ...(request.backend ? { backend: request.backend } : {}) });
     await this.events.append({ type: 'sandbox.created', executionId, payload: created });
     await this.sandbox.start(created.sandboxId);
     await this.events.append({ type: 'sandbox.started', executionId, payload: this.sandbox.status(created.sandboxId) });
+    const abort = () => { void this.sandbox.stop(created.sandboxId); };
+    if (signal) { if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true }); }
     try {
       return await this.sandbox.exec(created.sandboxId, { command: request.command.command, args: request.command.args ?? [], cwd: request.command.cwd ?? '.', env: request.command.env ?? {}, ...(request.command.stdin !== undefined ? { stdin: request.command.stdin } : {}), ...(request.command.timeoutMs !== undefined ? { timeoutMs: request.command.timeoutMs } : {}) });
-    } finally {
+    } finally { if (signal) signal.removeEventListener('abort', abort);
       await this.sandbox.destroy(created.sandboxId);
       await this.events.append({ type: 'sandbox.destroyed', executionId, payload: this.sandbox.status(created.sandboxId) });
     }
   }
 
   createOrchestrator(options: OrchestratorOptions = {}): HelixOrchestrator { return new HelixOrchestrator(this, options); }
+  async startFederationRuntime() { return this.federationRuntime.start(); }
+  async stopFederationRuntime() { return this.federationRuntime.stop(); }
+  federationRuntimeStatus() { return this.federationRuntime.status(); }
 
   async remember(input: Omit<MemoryRecord, 'id' | 'createdAt' | 'updatedAt'>): Promise<MemoryRecord> {
     await this.init();
@@ -275,6 +370,12 @@ export class HelixRuntime {
   async recordLearningOutcome(input: TaskOutcomeLearningInput): Promise<MemoryEntry[]> {
     await this.init();
     return input.success ? this.learning.recordSuccess(input) : this.learning.recordFailure(input);
+  }
+
+  async recordFederatedOutcome(input: FederatedOutcomeLearningInput): Promise<MemoryEntry> {
+    await this.init();
+    const content = input.success ? `Federated task ${input.taskId} completed on ${input.sourceNodeId}` : `Federated task ${input.taskId} failed on ${input.sourceNodeId}: ${input.error ?? 'unknown failure'}`;
+    return this.memory.create({ namespace: 'global', type: input.success ? 'observation' : 'failure', content, metadata: { sourceNodeId: input.sourceNodeId, attemptId: input.attemptId, success: input.success, quality: input.quality, executionTimeMs: input.executionTimeMs }, source: 'federation', agentId: input.agentId as import('../../core/src/index.js').AgentId, taskId: input.taskId, confidence: Math.max(0, Math.min(1, input.quality)), tags: ['federation', input.success ? 'success' : 'failure'], provenance: { sourceType: 'task-outcome', sourceId: `federation:${input.sourceNodeId}:${input.attemptId}`, timestamp: new Date().toISOString(), confidence: Math.max(0, Math.min(1, input.quality)), agentId: input.agentId as import('../../core/src/index.js').AgentId, taskId: input.taskId, executionId: input.executionId, sourceNodeId: input.sourceNodeId }, accessPolicy: { visibility: 'shared', allowedSubjects: ['runtime', 'federation-coordinator'], allowedSwarmIds: [], owner: 'federation-coordinator' } }, { subject: 'federation-coordinator' });
   }
 
   async flushLearning(): Promise<void> {
@@ -413,7 +514,8 @@ export class HelixRuntime {
 
   private async runTask(execution: ExecutionRecord, graph: TaskGraph, task: TaskRecord): Promise<void> {
     const taskStarted = Date.now();
-    const request = { taskType: task.title.toLowerCase().replaceAll(' ', '-'), requiredCapabilities: ['analysis'], complexity: 0.5, maxCostUsd: execution.budget.maxCostUsd };
+    const federated = this.federatedInputs.get(task.id);
+    const request = { taskType: task.title.toLowerCase().replaceAll(' ', '-'), requiredCapabilities: federated?.requiredCapabilities ?? ['analysis'], complexity: 0.5, maxCostUsd: execution.budget.maxCostUsd };
     const candidates: RoutingCandidate[] = this.agents.list().map((agent) => ({ agent, estimatedCostUsd: 0, availability: agent.status === 'idle' ? 1 : 0.5, memoryRelevance: 0.5 }));
     const learningScores = await this.learning.routingScores(request, candidates);
     const enrichedCandidates = candidates.map((candidate) => ({ ...candidate, learningBonus: learningScores.get(candidate.agent.id) ?? 0 }));
@@ -430,15 +532,17 @@ export class HelixRuntime {
       if (!lease) throw new Error(`Scheduler rejected task ${task.id}`);
       const observation: StructuredDecision = { decision: 'execute bounded task', confidence: route.score, evidence: route.rationale, constraints: ['no private chain-of-thought', 'policy-controlled tools'], selectedStrategy: route.strategy };
       await this.events.append({ type: 'agent.decision', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: observation });
-      const result = await this.provider.execute({ goal: execution.goal, task, agent: agent.name });
-      execution.usage.tokens += result.tokens;
-      execution.usage.costUsd += result.costUsd;
+      const result = federated?.sandbox ? await this.executeSandboxRequest(federated.sandbox, execution.id, agent.id, this.federatedControllers.get(task.id)?.signal) : await this.provider.execute({ goal: execution.goal, task, agent: agent.name });
+      if (this.federatedControllers.get(task.id)?.signal.aborted || execution.status === 'cancelled') throw new Error('federated task cancelled');
+      const normalizedResult: ProviderResult = 'output' in result && 'tokens' in result ? result as ProviderResult : { output: result, tokens: 0, costUsd: 0, quality: 0.75 };
+      execution.usage.tokens += normalizedResult.tokens;
+      execution.usage.costUsd += normalizedResult.costUsd;
       if (execution.usage.tokens > execution.budget.maxTokens || execution.usage.costUsd > execution.budget.maxCostUsd) throw new Error('Execution exceeded token or cost budget');
-      graph.update(task.id, { result: result.output });
+      graph.update(task.id, { result: normalizedResult.output });
       graph.setStatus(task.id, 'completed');
-      this.agents.recordOutcome(agent.id, { taskType: request.taskType, domain: 'general', success: true, quality: result.quality, latencyMs: Date.now() - taskStarted, tokens: result.tokens, costUsd: result.costUsd });
-      await this.events.append({ type: 'task.completed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { result: result.output, evaluation: { success: true, quality: result.quality, provider: this.provider.name } } });
-      const learningInput = { executionId: execution.id, taskId: task.id, taskType: request.taskType, agentId: agent.id, capabilities: request.requiredCapabilities, success: true, quality: result.quality, executionTimeMs: Date.now() - taskStarted, attempts: task.attempts + 1, output: result.output };
+      this.agents.recordOutcome(agent.id, { taskType: request.taskType, domain: 'general', success: true, quality: normalizedResult.quality, latencyMs: Date.now() - taskStarted, tokens: normalizedResult.tokens, costUsd: normalizedResult.costUsd });
+      await this.events.append({ type: 'task.completed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { result: normalizedResult.output, evaluation: { success: true, quality: normalizedResult.quality, provider: this.provider.name } } });
+      const learningInput = { executionId: execution.id, taskId: task.id, taskType: request.taskType, agentId: agent.id, capabilities: request.requiredCapabilities, success: true, quality: normalizedResult.quality, executionTimeMs: Date.now() - taskStarted, attempts: task.attempts + 1, output: normalizedResult.output };
       if (this.learningAsync) {
         this.learning.enqueueSuccess(learningInput);
         await this.events.append({ type: 'learning.outcome.queued', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { success: true, pendingWrites: this.learning.pendingWrites } });
