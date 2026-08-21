@@ -1,17 +1,71 @@
-flowchart TB
+flowchart TD
   User[Human / automation] --> API[Versioned HTTP API]
   User --> CLI[helix CLI]
   API --> Runtime[Helix Runtime]
   CLI --> Runtime
-  Runtime --> Router[Adaptive Router]
-  Runtime --> Planner[Validated Task DAG]
-  Runtime --> Scheduler[Lease Scheduler]
-  Runtime --> Agents[Agent Registry + Health]
-  Runtime --> Policy[Default-deny Policy + Approvals]
-  Runtime --> Provider[Provider Interface]
-  Runtime --> Events[Durable Event Store]
-  Events --> Replay[Replay + Snapshots]
-  Runtime --> Dashboard[Read-only Dashboard]
-  Policy -. guarded boundary .-> Tools[Tool / MCP adapters]
-  Events -. future adapter .-> Memory[Vector / graph memory]
-  Scheduler -. future federation .-> Nodes[Remote Helix nodes]
+
+  Runtime --> Goal[Goal model]
+  Goal --> Analysis[Deterministic goal analysis]
+  Analysis --> Decomposer[Bounded category-aware decomposition]
+  Decomposer --> IntelligencePlanner[Intelligence Planner]
+  IntelligencePlanner --> Plan[Typed Execution Plan]
+  Plan --> Validator[Plan Validator]
+  Validator -->|valid + authorized| Selector[Capability-first agent selector]
+  Validator -->|invalid or unauthorized| Reject[Typed rejection / approval required]
+  Selector --> Team[Swarm team + topology]
+  Team --> ExistingRouter[Existing AgentRouter]
+  ExistingRouter --> Agents[Agent Registry + health + reputation]
+  Team --> Scheduler[Existing Lease Scheduler + durable leases]
+  Scheduler --> Workers[Existing workers / task execution]
+  Workers --> SandboxManager[Existing SandboxManager]
+  SandboxManager --> SandboxPolicy[Canonical paths + exec allowlist + env filter]
+  SandboxPolicy --> Local[LocalSandbox best-effort controls]
+  SandboxPolicy --> Docker[DockerSandbox kernel/container controls]
+  Local --> Execution[Bounded command execution]
+  Docker --> Execution
+  Execution --> StepEvidence[Sanitized step evidence]
+  StepEvidence --> Evaluator[Evidence-based evaluator]
+  Evaluator -->|complete| Complete[COMPLETED]
+  Evaluator -->|failure / timeout| Replanner[Bounded Intelligence Replanner]
+  Replanner -->|alternative available and limits remain| Selector
+  Replanner -->|no alternative or limit reached| Failed[FAILED]
+  Runtime --> Cancel[Durable cancellation guard]
+  Cancel --> Cancelled[CANCELLED]
+
+  Analysis --> Recall[Advisory M10 memory recall]
+  Recall --> Cache[TTL/LRU MemoryCache]
+  Cache --> Search[Bounded hybrid search]
+  Search --> Indexes[SQLite indexes + FTS5 candidates]
+  Indexes --> Memory[SqliteMemoryStore]
+  Memory --> ACL[Namespace ACL + provenance + sanitization]
+  ACL --> Recall
+  Evaluator --> Learning[Persistent Learning Engine]
+  Learning --> Queue[Bounded async learning queue]
+  Queue --> Batch[Transactional batch persistence]
+  Batch --> Memory
+  Learning --> Bonus[Bounded learning signal <= 10%]
+  Bonus --> ExistingRouter
+  StepEvidence --> Events[Durable event store]
+  Events --> Replay[Replay + restart recovery]
+  Runtime --> Telemetry[Traces + metrics + structured logs]
+
+  Runtime --> Policy[Default-deny Policy + RBAC + Approvals]
+  Policy -. guards .-> Validator
+  Policy -. guards .-> Workers
+  Policy -. guards .-> SandboxManager
+  Runtime --> Provider[Provider interface]
+  Provider --> Models[Provider / model discovery]
+  Runtime --> Knowledge[Local knowledge graph]
+
+  Runtime --> MCP[M11/M12 MCP Server]
+  MCP --> Registry[190 typed tool registry]
+  Registry --> Families[21 capability families]
+  MCP --> Resources[11 protected resources]
+  MCP --> Prompts[10 policy-aware prompts]
+  MCP --> Auth[Actor authorization + rate limits + audit]
+  Auth --> Policy
+  Registry --> McpAudit[Sanitized MCP audit log]
+  McpAudit --> Events
+  MCP --> Stdio[Official SDK stdio transport]
+  MCP --> HTTP[Official SDK Streamable HTTP]
+  Runtime --> Dashboard[Read-only dashboard]

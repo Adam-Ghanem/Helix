@@ -15,6 +15,7 @@ export interface RoutingCandidate {
   estimatedCostUsd: number;
   availability: number;
   memoryRelevance: number;
+  learningBonus?: number;
 }
 
 export interface RoutingDecision {
@@ -45,7 +46,8 @@ export class AgentRouter {
     this.strategies.set('adaptive', (request, candidates) => this.choose(request, candidates, 'adaptive', (candidate) => {
       const base = 0.55 * this.capabilityScore(request, candidate) + 0.30 * candidate.agent.health.qualityScore + 0.15 * candidate.availability;
       const exploration = 1 / Math.sqrt(candidate.agent.health.samples + 1);
-      return Math.min(1, base + 0.15 * exploration);
+      const boundedLearning = Math.max(-0.1, Math.min(0.1, candidate.learningBonus ?? 0));
+      return Math.min(1, Math.max(0, base + 0.15 * exploration + boundedLearning));
     }));
   }
 
@@ -55,11 +57,13 @@ export class AgentRouter {
 
   route(request: RoutingRequest, candidates: RoutingCandidate[], strategy: RoutingStrategy = 'adaptive'): RoutingDecision {
     const available = candidates.filter((candidate) => candidate.agent.status !== 'offline' && candidate.availability > 0);
-    if (!available.length) throw new Error('No available agent satisfies the routing request');
+    const capabilityMatched = available.filter((candidate) => this.capabilityScore(request, candidate) === 1);
+    const eligible = request.requiredCapabilities.length && capabilityMatched.length ? capabilityMatched : available;
+    if (!eligible.length || (request.requiredCapabilities.length > 0 && !capabilityMatched.length)) throw new Error('No available agent satisfies the routing request');
     const chooser = this.strategies.get(strategy);
     if (!chooser) throw new Error(`Unknown routing strategy: ${strategy}`);
-    const decision = chooser(request, available);
-    this.cursor = (this.cursor + 1) % Math.max(1, available.length);
+    const decision = chooser(request, eligible);
+    this.cursor = (this.cursor + 1) % Math.max(1, eligible.length);
     return decision;
   }
 
@@ -72,6 +76,7 @@ export class AgentRouter {
       `capabilities=${this.capabilityScore(request, winner.candidate).toFixed(2)}`,
       `quality=${winner.candidate.agent.health.qualityScore.toFixed(2)}`,
       `availability=${winner.candidate.availability.toFixed(2)}`,
+      ...(winner.candidate.learningBonus !== undefined && winner.candidate.learningBonus !== 0 ? [`learningBonus=${winner.candidate.learningBonus.toFixed(3)}`] : []),
     ];
     return {
       agentId: winner.candidate.agent.id,
