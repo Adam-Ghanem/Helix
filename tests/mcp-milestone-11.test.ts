@@ -20,7 +20,7 @@ async function expectMcpError(run: () => Promise<unknown>, category: string): Pr
 }
 
 test('M11 registers 150+ unique typed tools with coherent family distribution', async () => withRuntime('helix-m11-registry-', async (_runtime, server) => {
-  assert.equal(server.registry.count(), 204);
+  assert.equal(server.registry.count(), 215);
   const names = server.registry.list().map((tool) => tool.name);
   assert.equal(new Set(names).size, names.length);
   for (const definition of server.registry.list()) assert.doesNotThrow(() => z.object(definition.inputSchema));
@@ -68,8 +68,8 @@ test('M11 rate limiter enforces stricter sensitive limits deterministically', ()
 });
 
 test('M11 resources and prompts are registered as protected server surfaces', async () => withRuntime('helix-m11-surfaces-', async (_runtime, server) => {
-  assert.deepEqual(server.resources, ['helix://agents', 'helix://tasks', 'helix://scheduler', 'helix://swarm', 'helix://memory', 'helix://metrics', 'helix://events', 'helix://system', 'helix://goals', 'helix://plans', 'helix://orchestrations', 'helix://swarms', 'helix://swarm-collaboration']);
-  assert.deepEqual(server.prompts, ['helix_plan_task', 'helix_review_result', 'helix_debug_task', 'helix_security_review', 'helix_swarm_plan', 'helix_memory_recall', 'helix_plan_goal', 'helix_review_plan', 'helix_debug_plan', 'helix_replan_failure']);
+  assert.deepEqual(server.resources, ['helix://agents', 'helix://tasks', 'helix://scheduler', 'helix://swarm', 'helix://memory', 'helix://metrics', 'helix://events', 'helix://system', 'helix://goals', 'helix://plans', 'helix://orchestrations', 'helix://swarms', 'helix://swarm-collaboration', 'helix://federation-nodes', 'helix://federation-status', 'helix://federation-metrics']);
+  assert.deepEqual(server.prompts, ['helix_plan_task', 'helix_review_result', 'helix_debug_task', 'helix_security_review', 'helix_swarm_plan', 'helix_memory_recall', 'helix_plan_goal', 'helix_review_plan', 'helix_debug_plan', 'helix_replan_failure', 'helix_federation_recovery', 'helix_federation_security']);
   assert.equal(typeof server.connectStdio, 'function');
   assert.equal(typeof server.handleHttp, 'function');
 }));
@@ -106,7 +106,7 @@ test('M11 legacy ToolRegistry can receive the same typed definitions without dup
   const registry = new ToolRegistryForTest();
   const definitions = buildMcpToolDefinitions(server.bridge);
   registry.registerMany(definitions);
-  assert.equal(registry.count(), 204);
+  assert.equal(registry.count(), 215);
 }));
 
 class ToolRegistryForTest {
@@ -119,3 +119,14 @@ class ToolRegistryForTest {
 void McpAuditLog;
 void McpAuthorization;
 void McpToolRegistry;
+
+test('M14 federation MCP tools and resources are registered under the governed boundary', async () => withRuntime('helix-m14-mcp-surfaces-', async (_runtime, server) => {
+  assert.equal(server.registry.listByFamily('federation').length, 19);
+  assert.equal(server.registry.has('helix_federation_task_dispatch'), true);
+  assert.equal(server.resources.includes('helix://federation-status'), true);
+  assert.equal(server.prompts.includes('helix_federation_recovery'), true);
+}));
+
+test('M14 remote federation dispatch remains denied to the default viewer actor', async () => withRuntime('helix-m14-mcp-auth-', async (_runtime, server) => {
+  await expectMcpError(() => server.execute('helix_federation_task_dispatch', { taskId: 'mcp-remote', requiredCapabilities: ['analysis'], locality: 'remote' }), 'FORBIDDEN');
+}));
