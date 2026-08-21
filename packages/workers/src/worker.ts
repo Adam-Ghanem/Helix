@@ -4,9 +4,9 @@ import type { ExecutionResult, TaskExecutor, WorkerEvent, WorkerSnapshot, Worker
 
 export class AgentWorker {
   private status: WorkerStatus = 'idle';
-  private taskId?: string;
-  private controller?: AbortController;
-  private timeout?: ReturnType<typeof setTimeout>;
+  private taskId: string | undefined;
+  private controller: AbortController | undefined;
+  private timeout: ReturnType<typeof setTimeout> | undefined;
   private listeners = new Set<(event: WorkerEvent) => void>();
   constructor(readonly agentId: AgentId, private readonly scheduler: AgentScheduler, private readonly executor: TaskExecutor, private readonly timeoutMs = 30_000) {}
   on(listener: (event: WorkerEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
@@ -26,7 +26,10 @@ export class AgentWorker {
       this.scheduler.registry.recordOutcome(this.agentId, { taskType: task.requiredCapabilities[0] ?? 'general', domain: task.requiredCapabilities[0] ?? 'general', success: final.success && !timedOut, quality: final.quality, latencyMs: final.latencyMs, tokens: final.tokens, timedOut });
       if (timedOut) this.emit('worker.timeout', taskId); else if (final.success) this.emit('worker.completed', taskId); else this.emit('worker.failed', taskId);
       return final;
-    } finally { if (this.timeout) clearTimeout(this.timeout); this.timeout = undefined; this.controller = undefined; this.taskId = undefined; this.status = 'idle'; }
+    } finally {
+      if (this.timeout !== undefined) clearTimeout(this.timeout);
+      this.timeout = undefined; this.controller = undefined; this.taskId = undefined; this.status = 'idle';
+    }
   }
   cancel(): void { if (!this.taskId || !this.controller) return; const id = this.taskId; this.controller.abort(); this.scheduler.complete(id, false, 'Worker cancelled'); this.emit('worker.cancelled', id); this.taskId = undefined; this.status = 'idle'; }
   stop(): void { this.cancel(); this.status = 'stopped'; }
