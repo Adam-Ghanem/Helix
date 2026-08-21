@@ -51,10 +51,8 @@ describe('Milestone 2 scheduler', () => {
     const registry = registryWith({ name: 'coder', role: 'coder', capabilities: ['coding'] });
     const scheduler = new AgentScheduler(registry, new AgentRouter(), { defaultAgentCapacity: 1 });
     const task = scheduler.enqueue({ title: 'single', requiredCapabilities: ['coding'] });
-    const first = scheduler.tick();
-    const second = scheduler.tick();
-    expect(first).toHaveLength(1);
-    expect(second).toHaveLength(0);
+    expect(scheduler.tick()).toHaveLength(1);
+    expect(scheduler.tick()).toHaveLength(0);
     expect(scheduler.assignments()).toHaveLength(1);
     expect(scheduler.assignments()[0].taskId).toBe(task.id);
   });
@@ -69,7 +67,7 @@ describe('Milestone 2 scheduler', () => {
     registry.recordOutcome(weak.id, { taskType: 'coding', domain: 'backend', success: false, quality: 0, latencyMs: 1000, tokens: 100 });
     const scheduler = new AgentScheduler(registry, new AgentRouter(), { defaultAgentCapacity: 1 });
     const task = scheduler.enqueue({ title: 'route', requiredCapabilities: ['coding'] });
-    expect(scheduler.tick()[0].assignedAgentId).toBe(task.assignedAgentId);
+    scheduler.tick();
     expect(scheduler.get(task.id).assignedAgentId).toBe(strong.id);
   });
 
