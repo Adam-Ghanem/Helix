@@ -27,5 +27,8 @@
     "@types/node": "^22.10.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0"
   }
 }

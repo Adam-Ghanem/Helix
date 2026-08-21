@@ -41,6 +41,40 @@ export interface MemoryEntry {
   embedding?: number[];
 }
 
+export interface MemoryBatchInput {
+  input: MemoryEntryInput;
+  context?: MemoryAccessContext;
+}
+
+export interface MemoryCompactionOptions {
+  mergePatterns?: boolean;
+  removeExpiredLegacy?: boolean;
+  vacuum?: boolean;
+}
+
+export interface MemoryCompactionResult {
+  removedDuplicates: number;
+  removedExpiredLegacy: number;
+  vacuumed: boolean;
+}
+
+export interface MemoryBackend {
+  init(): Promise<void>;
+  create(input: MemoryEntryInput, context?: MemoryAccessContext): Promise<MemoryEntry>;
+  createMany?(inputs: MemoryBatchInput[]): Promise<MemoryEntry[]>;
+  get(memoryId: string, context?: MemoryAccessContext): Promise<MemoryEntry>;
+  update(memoryId: string, input: MemoryUpdateInput, context: MemoryAccessContext): Promise<MemoryEntry>;
+  delete(memoryId: string, context: MemoryAccessContext): Promise<void>;
+  listEntries(context: MemoryAccessContext, namespace?: MemoryNamespace): Promise<MemoryEntry[]>;
+  count(context?: MemoryAccessContext): Promise<number>;
+  stats(context?: MemoryAccessContext): Promise<MemoryStats>;
+  searchEntries(options: MemorySearchOptions): Promise<MemorySearchResult[]>;
+  store(input: Omit<MemoryRecord, 'id' | 'createdAt' | 'updatedAt'>): Promise<MemoryRecord>;
+  search(query: MemoryQuery): Promise<MemoryHit[]>;
+  compact?(options?: MemoryCompactionOptions): Promise<MemoryCompactionResult>;
+  cacheSize?(): number;
+}
+
 export interface MemoryEntryInput {
   namespace: MemoryNamespace;
   type: MemoryType;
@@ -95,7 +129,9 @@ export interface MemorySearchOptions {
   agentId?: AgentId;
   swarmId?: string;
   limit?: number;
+  retrievalLimit?: number;
   minScore?: number;
+  minConfidence?: number;
   context?: MemoryAccessContext;
   weights?: Partial<MemorySearchWeights>;
   now?: string;

@@ -46,25 +46,33 @@ export class MemoryStore {
   }
 
   async create(input: MemoryEntryInput, context?: MemoryAccessContext): Promise<MemoryEntry> {
+    const [entry] = await this.createMany([{ input, ...(context ? { context } : {}) }]);
+    if (!entry) throw new Error('Memory create did not produce an entry');
+    return entry;
+  }
+
+  async createMany(inputs: Array<{ input: MemoryEntryInput; context?: MemoryAccessContext }>): Promise<MemoryEntry[]> {
     await this.init();
-    const subject = context?.subject ?? input.accessPolicy.owner;
-    assertMemoryWritePolicy({ namespace: input.namespace, accessPolicy: input.accessPolicy, subject });
-    const now = timestamp();
-    const entry: MemoryEntry = {
-      ...input,
-      id: id('mem'),
-      metadata: { ...(input.metadata ?? {}) },
-      tags: [...new Set(input.tags ?? [])],
-      confidence: clamp(input.confidence ?? input.provenance.confidence),
-      createdAt: now,
-      updatedAt: now,
-      embedding: await this.embeddingProvider.embed(input.content),
-    };
+    const entries = await Promise.all(inputs.map(async ({ input, context }) => {
+      const subject = context?.subject ?? input.accessPolicy.owner;
+      assertMemoryWritePolicy({ namespace: input.namespace, accessPolicy: input.accessPolicy, subject });
+      const now = timestamp();
+      return {
+        ...input,
+        id: id('mem'),
+        metadata: { ...(input.metadata ?? {}) },
+        tags: [...new Set(input.tags ?? [])],
+        confidence: clamp(input.confidence ?? input.provenance.confidence),
+        createdAt: now,
+        updatedAt: now,
+        embedding: await this.embeddingProvider.embed(input.content),
+      } satisfies MemoryEntry;
+    }));
     await this.enqueue(async () => {
-      this.entries.set(entry.id, entry);
-      await appendFile(this.file, `${JSON.stringify({ kind: 'upsert', entry })}\n`, 'utf8');
+      for (const entry of entries) this.entries.set(entry.id, entry);
+      if (entries.length) await appendFile(this.file, `${entries.map((entry) => JSON.stringify({ kind: 'upsert', entry })).join('\n')}\n`, 'utf8');
     });
-    return structuredClone(entry);
+    return entries.map((entry) => structuredClone(entry));
   }
 
   async get(memoryId: string, context?: MemoryAccessContext): Promise<MemoryEntry> {
