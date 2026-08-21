@@ -14,6 +14,7 @@ import { defaultSandboxPolicy, SandboxPolicy } from '../../sandbox/src/types.js'
 import { SandboxExecutionRequest } from '../../core/src/index.js';
 import { ToolRegistry, PublicToolDefinition } from '../../tools/src/index.js';
 import { registerHelixMemoryTools } from '../../mcp/src/index.js';
+import { HelixOrchestrator, type OrchestratorOptions } from '../../intelligence/src/index.js';
 
 export interface ProviderResult {
   output: unknown;
@@ -200,6 +201,8 @@ export class HelixRuntime {
       await this.events.append({ type: 'sandbox.destroyed', executionId, payload: this.sandbox.status(created.sandboxId) });
     }
   }
+
+  createOrchestrator(options: OrchestratorOptions = {}): HelixOrchestrator { return new HelixOrchestrator(this, options); }
 
   async remember(input: Omit<MemoryRecord, 'id' | 'createdAt' | 'updatedAt'>): Promise<MemoryRecord> {
     await this.init();
