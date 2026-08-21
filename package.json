@@ -21,7 +21,11 @@
     "golden-demo": "pnpm exec tsc -p tsconfig.json && node examples/golden-demo.mjs",
     "sandbox-demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-sandbox-demo.js",
     "memory-demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-memory-learning-demo.js",
-    "memory-benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/memory-learning.js"
+    "memory-benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/memory-learning.js",
+    "mcp:serve": "pnpm exec tsc -p tsconfig.json && node dist/apps/mcp/src/index.js",
+    "mcp:serve:http": "pnpm exec tsc -p tsconfig.json && node dist/apps/mcp/src/index.js --http",
+    "mcp:demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-mcp-demo.js",
+    "mcp:benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/mcp.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
@@ -29,6 +33,8 @@
     "typescript": "^5.7.2"
   },
   "dependencies": {
-    "better-sqlite3": "^11.10.0"
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "better-sqlite3": "^11.10.0",
+    "zod": "^3.25.76"
   }
 }

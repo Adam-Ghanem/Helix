@@ -50,6 +50,8 @@ export class McpGateway {
 }
 
 
+export * from './m11.js';
+
 export interface HelixMemoryToolHandlers {
   search(input: Record<string, unknown>): Promise<unknown>;
   get(input: Record<string, unknown>): Promise<unknown>;
