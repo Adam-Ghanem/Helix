@@ -1,3 +1,5 @@
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { id, timestamp } from '../../core/src/index.js';
 
 export interface Lease {
@@ -13,6 +15,7 @@ export interface Lease {
 export interface SchedulerOptions {
   leaseMs?: number;
   maxConcurrency?: number;
+  stateFile?: string;
 }
 
 export class LeaseScheduler {
@@ -20,10 +23,13 @@ export class LeaseScheduler {
   private active = 0;
   private readonly leaseMs: number;
   private readonly maxConcurrency: number;
+  private readonly stateFile: string | undefined;
 
   constructor(options: SchedulerOptions = {}) {
     this.leaseMs = options.leaseMs ?? 30_000;
     this.maxConcurrency = options.maxConcurrency ?? 4;
+    this.stateFile = options.stateFile;
+    this.restore();
   }
 
   acquire(taskId: string, workerId: string): Lease | undefined {
@@ -34,6 +40,7 @@ export class LeaseScheduler {
     const lease: Lease = { id: id('lease'), taskId, workerId, acquiredAt: timestamp(), heartbeatAt: timestamp(), expiresAt: now + this.leaseMs, attempts: 1 };
     this.leases.set(lease.id, lease);
     this.active += 1;
+    this.persist();
     return structuredClone(lease);
   }
 
@@ -42,23 +49,28 @@ export class LeaseScheduler {
     if (lease.expiresAt < Date.now()) throw new Error(`Lease ${leaseId} has expired`);
     lease.heartbeatAt = timestamp();
     lease.expiresAt = Date.now() + this.leaseMs;
+    this.persist();
     return structuredClone(lease);
   }
 
   release(leaseId: string): void {
     if (!this.leases.delete(leaseId)) throw new Error(`Unknown lease: ${leaseId}`);
     this.active = Math.max(0, this.active - 1);
+    this.persist();
   }
 
   recoverExpired(now = Date.now()): Lease[] {
     const recovered: Lease[] = [];
+    let changed = false;
     for (const [leaseId, lease] of this.leases) {
       if (lease.expiresAt < now) {
         recovered.push(structuredClone(lease));
         this.leases.delete(leaseId);
         this.active = Math.max(0, this.active - 1);
+        changed = true;
       }
     }
+    if (changed) this.persist();
     return recovered;
   }
 
@@ -78,6 +90,26 @@ export class LeaseScheduler {
       this.release(lease.id);
       throw error;
     }
+  }
+
+  private restore(): void {
+    if (!this.stateFile) return;
+    try {
+      const persisted = JSON.parse(readFileSync(this.stateFile, 'utf8')) as Lease[];
+      for (const lease of persisted) this.leases.set(lease.id, lease);
+      this.active = this.leases.size;
+      this.recoverExpired();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+
+  private persist(): void {
+    if (!this.stateFile) return;
+    mkdirSync(dirname(this.stateFile), { recursive: true });
+    const temporary = `${this.stateFile}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify([...this.leases.values()], null, 2), 'utf8');
+    renameSync(temporary, this.stateFile);
   }
 
   private require(leaseId: string): Lease {

@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { HelixRuntime } from '../../../packages/runtime/src/index.js';
+import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
 
 const args = process.argv.slice(2);
 const jsonOutput = args.includes('--json');
 const dataDirectory = process.env.HELIX_DATA_DIR ?? join(process.cwd(), '.helix');
-const runtime = new HelixRuntime({ dataDirectory });
+const modelProvider = process.env.HELIX_MODEL_API_URL && process.env.HELIX_MODEL_API_KEY && process.env.HELIX_MODEL
+  ? new HttpModelProvider({ endpoint: process.env.HELIX_MODEL_API_URL, apiKey: process.env.HELIX_MODEL_API_KEY, model: process.env.HELIX_MODEL })
+  : undefined;
+const runtime = new HelixRuntime({ dataDirectory, ...(modelProvider ? { provider: modelProvider } : {}) });
 
 function print(value: unknown): void {
   if (jsonOutput) console.log(JSON.stringify(value, null, 2));

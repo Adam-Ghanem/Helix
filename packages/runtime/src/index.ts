@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { AgentRegistry } from '../../agents/src/index.js';
 import { EventStore } from '../../durable/src/index.js';
 import { DEFAULT_BUDGET, EventEnvelope, ExecutionInput, ExecutionRecord, ResourceUsage, StructuredDecision, TaskRecord, ToolRequest, id, timestamp, withDefaultBudget } from '../../core/src/index.js';
@@ -18,6 +19,45 @@ export interface ProviderResult {
 export interface ModelProvider {
   readonly name: string;
   execute(input: { goal: string; task: TaskRecord; agent: string }): Promise<ProviderResult>;
+}
+
+export class HttpModelProvider implements ModelProvider {
+  readonly name: string;
+  private readonly endpoint: string;
+  private readonly apiKey: string;
+  private readonly model: string;
+  private readonly timeoutMs: number;
+
+  constructor(options: { endpoint: string; apiKey: string; model: string; timeoutMs?: number; name?: string }) {
+    this.endpoint = options.endpoint.replace(/\/$/, '');
+    this.apiKey = options.apiKey;
+    this.model = options.model;
+    this.timeoutMs = options.timeoutMs ?? 60_000;
+    this.name = options.name ?? 'openai-compatible-http';
+  }
+
+  async execute(input: { goal: string; task: TaskRecord; agent: string }): Promise<ProviderResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(`${this.endpoint}/chat/completions`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: { authorization: `Bearer ${this.apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: this.model, messages: [{ role: 'system', content: 'You are a bounded Helix worker. Return concise, evidence-oriented output.' }, { role: 'user', content: `Goal: ${input.goal}\\nTask: ${input.task.title}\\nDescription: ${input.task.description}\\nAgent: ${input.agent}` }], temperature: 0.2 }),
+      });
+      if (!response.ok) throw new Error(`Model provider returned HTTP ${response.status}`);
+      const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }>; usage?: { total_tokens?: number } };
+      const content = payload.choices?.[0]?.message?.content;
+      if (typeof content !== 'string') throw new Error('Model provider returned no assistant content');
+      return { output: { content, provider: this.name, model: this.model }, tokens: payload.usage?.total_tokens ?? 0, costUsd: 0, quality: 0.5 };
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw new Error(`Model provider timed out after ${this.timeoutMs}ms`);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
 
 export class DeterministicProvider implements ModelProvider {
@@ -73,7 +113,7 @@ export class HelixRuntime {
     this.agents = options.agents ?? new AgentRegistry();
     this.router = options.router ?? new AgentRouter();
     this.policy = options.policy ?? new PolicyEngine(secureDefaultRules);
-    this.scheduler = options.scheduler ?? new LeaseScheduler();
+    this.scheduler = options.scheduler ?? new LeaseScheduler({ stateFile: join(options.dataDirectory, 'helix.leases.json') });
     this.provider = options.provider ?? new DeterministicProvider();
     this.memory = options.memory ?? new MemoryStore(options.dataDirectory);
     this.telemetry = options.telemetry ?? new Telemetry();
@@ -255,9 +295,10 @@ export class HelixRuntime {
     this.agents.setStatus(agent.id, 'busy');
     execution.usage.agents = Math.min(execution.budget.maxAgents, execution.usage.agents + 1);
     await this.events.append({ type: 'task.started', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { task, route } });
-    const lease = this.scheduler.acquire(task.id, agent.id);
-    if (!lease) throw new Error(`Scheduler rejected task ${task.id}`);
+    let lease: ReturnType<LeaseScheduler['acquire']>;
     try {
+      lease = this.scheduler.acquire(task.id, agent.id);
+      if (!lease) throw new Error(`Scheduler rejected task ${task.id}`);
       const observation: StructuredDecision = { decision: 'execute bounded task', confidence: route.score, evidence: route.rationale, constraints: ['no private chain-of-thought', 'policy-controlled tools'], selectedStrategy: route.strategy };
       await this.events.append({ type: 'agent.decision', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: observation });
       const result = await this.provider.execute({ goal: execution.goal, task, agent: agent.name });
@@ -274,7 +315,7 @@ export class HelixRuntime {
       this.agents.recordOutcome(agent.id, { taskType: request.taskType, domain: 'general', success: false, quality: 0, latencyMs: 0, tokens: 0 });
       await this.events.append({ type: 'task.failed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { error: error instanceof Error ? error.message : String(error) } });
     } finally {
-      this.scheduler.release(lease.id);
+      if (lease) this.scheduler.release(lease.id);
       this.agents.setStatus(agent.id, 'idle');
     }
   }

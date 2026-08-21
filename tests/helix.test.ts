@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,7 +9,8 @@ import { TaskGraph } from '../packages/planner/src/index.js';
 import { PolicyEngine, secureDefaultRules } from '../packages/policy/src/index.js';
 import { AgentRegistry } from '../packages/agents/src/index.js';
 import { AgentRouter } from '../packages/router/src/index.js';
-import { HelixRuntime } from '../packages/runtime/src/index.js';
+import { LeaseScheduler } from '../packages/scheduler/src/index.js';
+import { HelixRuntime, HttpModelProvider } from '../packages/runtime/src/index.js';
 import { MemoryStore } from '../packages/memory/src/index.js';
 import { ToolRegistry } from '../packages/tools/src/index.js';
 import { McpGateway } from '../packages/mcp/src/index.js';
@@ -19,6 +21,11 @@ import { SwarmCoordinator } from '../packages/swarm/src/index.js';
 import { KnowledgeGraph } from '../packages/knowledge/src/index.js';
 import { EvaluationEngine } from '../packages/evaluation/src/index.js';
 import { LearningEngine } from '../packages/learning/src/index.js';
+import { PathValidator, SafeExecutor } from '../packages/security/src/index.js';
+import { LocalSandbox } from '../packages/sandbox/src/index.js';
+import { FederationRegistry } from '../packages/federation/src/index.js';
+import { ProviderRegistry } from '../packages/providers/src/index.js';
+import { PluginRegistry } from '../packages/plugins/src/index.js';
 import type { TaskRecord } from '../packages/core/src/index.js';
 
 test('event store orders, persists, replays, and deduplicates events', async () => {
@@ -236,4 +243,107 @@ test('evaluation and learning engines produce structured, reusable evidence', as
   const patterns = learning.record({ executionId: 'ex', steps: [{ taskType: 'review', agentId: 'agent', strategy: 'adaptive', latencyMs: 10, costUsd: 0, success: true }], evaluation: { success: true, quality: 0.9, costUsd: 0, latencyMs: 10, reliability: 1, toolEfficiency: 1, notes: [] } });
   assert.equal(patterns[0]?.kind, 'successful-strategy');
   assert.equal(learning.recommend('review')[0]?.key.includes('review'), true);
+});
+
+
+test('event store coordinates concurrent instances with unique ordered sequences', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-concurrent-events-'));
+  try {
+    const left = new EventStore({ directory });
+    const right = new EventStore({ directory });
+    await Promise.all([...Array.from({ length: 10 }, (_, index) => left.append({ type: 'left', payload: { index }, idempotencyKey: `left-${index}` })), ...Array.from({ length: 10 }, (_, index) => right.append({ type: 'right', payload: { index }, idempotencyKey: `right-${index}` }))]);
+    const events = await left.read();
+    assert.equal(events.length, 20);
+    assert.equal(new Set(events.map((event) => event.sequence)).size, 20);
+    assert.deepEqual(events.map((event) => event.sequence), [...events.map((event) => event.sequence)].sort((a, b) => a - b));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('security boundary rejects traversal and non-allowlisted commands', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'helix-sandbox-'));
+  try {
+    const paths = new PathValidator(workspace);
+    assert.equal(paths.resolve('nested/file.txt').startsWith(workspace), true);
+    assert.throws(() => paths.resolve('../outside.txt'), /escapes allowed root/);
+    const executor = new SafeExecutor(paths);
+    await assert.rejects(() => executor.run('sh', ['-c', 'echo unsafe'], { cwd: '.', allowedCommands: ['node'] }), /not allowlisted/);
+    const sandbox = new LocalSandbox({ workspace, allowedCommands: ['node'], timeoutMs: 1000 });
+    const result = await sandbox.execute('node', ['-e', "process.stdout.write('safe')"]);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, 'safe');
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+
+test('federation verifies signed messages once and blocks replay', () => {
+  const federation = new FederationRegistry();
+  federation.register({ id: 'node-a', endpoint: 'https://a.example.test', capabilities: ['analysis'], status: 'offline' });
+  federation.heartbeat('node-a');
+  const message = federation.sign('node-a', 'node-b', { task: 'review' }, 'shared-secret');
+  assert.equal(federation.verify(message, 'shared-secret'), true);
+  assert.equal(federation.verify(message, 'shared-secret'), false);
+  assert.equal(federation.verify(message, 'wrong-secret'), false);
+  const malformed = { ...federation.sign('node-a', 'node-b', { task: 'review' }, 'shared-secret'), signature: 'x' };
+  assert.equal(federation.verify(malformed, 'shared-secret'), false);
+});
+
+test('provider registry selects an available model by capability, budget, and latency', () => {
+  const providers = new ProviderRegistry();
+  providers.register({ id: 'fast', provider: 'local', capabilities: ['analysis'], contextWindow: 8000, inputCostPerMillion: 0, outputCostPerMillion: 0, latencyMs: 50, available: true });
+  providers.register({ id: 'slow', provider: 'remote', capabilities: ['analysis'], contextWindow: 128000, inputCostPerMillion: 2, outputCostPerMillion: 8, latencyMs: 500, available: true });
+  assert.equal(providers.select('analysis', 1, 100).id, 'fast');
+});
+
+test('plugin registry rejects untrusted signatures and authorizes declared permissions', () => {
+  const plugins = new PluginRegistry();
+  const manifest = { name: 'reviewer', version: '1.0.0', entrypoint: './reviewer.js', permissions: ['memory:read'], tools: ['review'] };
+  assert.throws(() => plugins.register({ ...manifest, signature: 'bad' }, []), /signature is not trusted/);
+  const accepted = plugins.register({ ...manifest, signature: 'trusted' }, ['trusted']);
+  assert.equal(accepted.status, 'registered');
+  assert.equal(plugins.authorize('reviewer', 'memory:read'), true);
+  assert.equal(plugins.authorize('reviewer', 'shell:execute'), false);
+});
+
+
+test('scheduler persists leases and recovers expired state after restart', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-leases-'));
+  const stateFile = join(directory, 'leases.json');
+  try {
+    const first = new LeaseScheduler({ stateFile, leaseMs: 1000 });
+    const lease = first.acquire('task-1', 'worker-1');
+    assert.ok(lease);
+    const second = new LeaseScheduler({ stateFile, leaseMs: 1000 });
+    assert.equal(second.list().length, 1);
+    const expired = second.recoverExpired(Date.now() + 2000);
+    assert.equal(expired.length, 1);
+    assert.equal(new LeaseScheduler({ stateFile, leaseMs: 1000 }).list().length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('HTTP model provider calls an OpenAI-compatible endpoint with bounded output parsing', async () => {
+  const server = createServer((request, response) => {
+    assert.equal(request.headers.authorization, 'Bearer provider-key');
+    assert.equal(request.url, '/chat/completions');
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ choices: [{ message: { content: 'provider result' } }], usage: { total_tokens: 42 } }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const provider = new HttpModelProvider({ endpoint: `http://127.0.0.1:${address.port}/`, apiKey: 'provider-key', model: 'test-model', timeoutMs: 1000 });
+    const result = await provider.execute({ goal: 'goal', agent: 'agent', task: { id: 'task', executionId: 'ex', title: 'Review', description: 'review', dependencies: [], status: 'ready', attempts: 0 } });
+    assert.equal((result.output as { content: string }).content, 'provider result');
+    assert.equal(result.tokens, 42);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
 });

@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { EventEnvelope, EventId, id, timestamp } from '../../core/src/index.js';
 
@@ -18,6 +18,7 @@ export interface Snapshot<T> {
 export class EventStore {
   private readonly file: string;
   private readonly snapshotFile: string;
+  private readonly lockDirectory: string;
   private sequence = 0;
   private events: EventEnvelope[] = [];
   private idempotency = new Set<string>();
@@ -28,6 +29,7 @@ export class EventStore {
     const stream = options.streamName ?? 'helix';
     this.file = join(options.directory, `${stream}.events.jsonl`);
     this.snapshotFile = join(options.directory, `${stream}.snapshot.json`);
+    this.lockDirectory = join(options.directory, `${stream}.append.lock`);
   }
 
   async init(): Promise<void> {
@@ -53,7 +55,8 @@ export class EventStore {
     input: Omit<EventEnvelope<T>, 'eventId' | 'sequence' | 'timestamp' | 'schemaVersion'> & { eventId?: EventId; idempotencyKey?: string },
   ): Promise<EventEnvelope<T>> {
     await this.init();
-    const event = await this.enqueue(async () => {
+    const event = await this.enqueue(async () => this.withFileLock(async () => {
+      await this.reloadFromDisk();
       if (input.idempotencyKey && this.idempotency.has(input.idempotencyKey)) {
         const existing = this.events.find((candidate) => this.idempotencyKey(candidate) === input.idempotencyKey);
         if (existing) return existing as EventEnvelope<T>;
@@ -76,12 +79,13 @@ export class EventStore {
       this.events.push(next);
       if (input.idempotencyKey) this.idempotency.add(input.idempotencyKey);
       return next;
-    });
+    }));
     return event;
   }
 
   async read(predicate?: EventPredicate): Promise<EventEnvelope[]> {
     await this.init();
+    await this.reloadFromDisk();
     const copy = [...this.events];
     return predicate ? copy.filter(predicate) : copy;
   }
@@ -100,7 +104,9 @@ export class EventStore {
   async snapshot<T>(state: T): Promise<Snapshot<T>> {
     await this.init();
     const snapshot: Snapshot<T> = { sequence: this.sequence, createdAt: timestamp(), state };
-    await writeFile(this.snapshotFile, JSON.stringify(snapshot, null, 2), 'utf8');
+    const temporary = `${this.snapshotFile}.${process.pid}.tmp`;
+    await writeFile(temporary, JSON.stringify(snapshot, null, 2), 'utf8');
+    await rename(temporary, this.snapshotFile);
     return snapshot;
   }
 
@@ -120,6 +126,46 @@ export class EventStore {
 
   private idempotencyKey(event: EventEnvelope): string | undefined {
     return event.idempotencyKey;
+  }
+
+  private async reloadFromDisk(): Promise<void> {
+    try {
+      const contents = await readFile(this.file, 'utf8');
+      const events = contents.split('\n').filter(Boolean).map((line) => JSON.parse(line) as EventEnvelope);
+      this.events = events;
+      this.sequence = events.reduce((maximum, event) => Math.max(maximum, event.sequence), 0);
+      this.idempotency = new Set(events.map((event) => this.idempotencyKey(event)).filter((key): key is string => Boolean(key)));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      this.events = [];
+      this.sequence = 0;
+      this.idempotency.clear();
+    }
+  }
+
+  private async withFileLock<T>(operation: () => Promise<T>): Promise<T> {
+    const started = Date.now();
+    while (true) {
+      try {
+        await mkdir(this.lockDirectory);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        try {
+          const lockAge = Date.now() - (await stat(this.lockDirectory)).mtimeMs;
+          if (lockAge > 30_000) await rm(this.lockDirectory, { recursive: true, force: true });
+        } catch (statError) {
+          if ((statError as NodeJS.ErrnoException).code !== 'ENOENT') throw statError;
+        }
+        if (Date.now() - started > 30_000) throw new Error('Timed out acquiring event-store append lock');
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    }
+    try {
+      return await operation();
+    } finally {
+      await rm(this.lockDirectory, { recursive: true, force: true });
+    }
   }
 
   private async enqueue<T>(operation: () => Promise<T>): Promise<T> {

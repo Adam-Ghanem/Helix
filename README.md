@@ -28,6 +28,8 @@ pnpm dev:cli run "Review this repository architecture" --json
 
 The API listens on `http://127.0.0.1:8787` by default. Set `HELIX_DATA_DIR` to choose the durable data directory and `HELIX_PORT` or `HELIX_HOST` to change the listener. For non-local access, set `HELIX_API_KEY`; all routes except `/api/v1/health` then require `Authorization: Bearer <key>`. Request bodies are bounded and a per-client request rate limit is enforced.
 
+To use a real OpenAI-compatible provider, set `HELIX_MODEL_API_URL`, `HELIX_MODEL_API_KEY`, and `HELIX_MODEL`. When all three are present, both the API and CLI use the bounded HTTP adapter with request timeouts and usage accounting. If they are absent, Helix intentionally uses the deterministic local provider.
+
 ## Repository map
 
 | Area | Purpose | Status |
@@ -48,11 +50,13 @@ The API listens on `http://127.0.0.1:8787` by default. Set `HELIX_DATA_DIR` to c
 | `packages/observability` | Correlated spans, metrics, and structured logs | Implemented |
 | `packages/evaluation` | Rule, schema, test, human, and non-authoritative LLM-judge evaluation contracts | Implemented |
 | `packages/learning` | Trajectory evidence and reusable strategy/tool patterns | Implemented |
+| `packages/security` / `packages/sandbox` | Traversal-safe paths, command allowlists, environment filtering, timeout controls | Implemented controls; OS isolation boundary remains |
+| `packages/plugins` / `packages/providers` | Plugin trust and provider/model capability discovery | Implemented foundations |
+| `packages/federation` | Signed messages, replay protection, node registry, heartbeat | Implemented foundation |
 | `packages/sdk` | TypeScript client for execution, lifecycle, memory, telemetry, approvals | Implemented |
 | `apps/api` | Versioned HTTP API | Implemented |
 | `apps/cli` | Professional CLI with JSON output | Implemented |
 | `apps/dashboard` | Read-only dashboard shell | Boundary documented |
-| `packages/federation`, `packages/sandbox` | Remote nodes and isolated execution | Interfaces and policy hooks only |
 
 ## Security posture
 

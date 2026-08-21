@@ -1,14 +1,17 @@
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
-import { HelixRuntime } from '../../../packages/runtime/src/index.js';
+import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
 
 const port = Number(process.env.HELIX_PORT ?? 8787);
 const host = process.env.HELIX_HOST ?? '127.0.0.1';
 const dataDirectory = process.env.HELIX_DATA_DIR ?? join(process.cwd(), '.helix');
+const modelProvider = process.env.HELIX_MODEL_API_URL && process.env.HELIX_MODEL_API_KEY && process.env.HELIX_MODEL
+  ? new HttpModelProvider({ endpoint: process.env.HELIX_MODEL_API_URL, apiKey: process.env.HELIX_MODEL_API_KEY, model: process.env.HELIX_MODEL })
+  : undefined;
 const apiKey = process.env.HELIX_API_KEY;
 const maxBodyBytes = Number(process.env.HELIX_MAX_BODY_BYTES ?? 1_048_576);
 const rateLimitPerMinute = Number(process.env.HELIX_RATE_LIMIT_PER_MINUTE ?? 120);
-const runtime = new HelixRuntime({ dataDirectory });
+const runtime = new HelixRuntime({ dataDirectory, ...(modelProvider ? { provider: modelProvider } : {}) });
 const buckets = new Map<string, { count: number; resetAt: number }>();
 await runtime.init();
 
@@ -131,7 +134,7 @@ const server = createServer(async (request, response) => {
     return json(response, 404, { error: 'not_found' });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const status = /unknown|not found|exceeds|invalid|already|not failed/i.test(message) ? 400 : 500;
+    const status = error instanceof SyntaxError || /unknown|not found|exceeds|invalid|already|not failed|JSON|body/i.test(message) ? 400 : 500;
     return json(response, status, { error: message });
   }
 });
