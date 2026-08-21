@@ -57,7 +57,7 @@ export class FederationCoordinator {
     this.leases = options.leases ?? new DistributedLeaseManager();
     this.transport = options.transport ?? new InMemoryFederationTransport(this.localNodeId, options.network);
     this.signer = options.signer; this.verifier = options.verifier; this.eventSink = options.eventSink; this.now = options.now ?? Date.now; this.inbox = options.inbox; this.outbox = options.outbox; this.retryPolicy = { maxRetries: Math.max(0, Math.floor(options.retryPolicy?.maxRetries ?? 2)), baseDelayMs: Math.max(1, options.retryPolicy?.baseDelayMs ?? 25), maxDelayMs: Math.max(1, options.retryPolicy?.maxDelayMs ?? 1_000), ...(options.retryPolicy?.jitterMs !== undefined ? { jitterMs: options.retryPolicy.jitterMs } : {}) };
-    this.unsubscribe = this.transport.subscribe((message) => { void this.receive(message); });
+    this.unsubscribe = this.transport.subscribe((message) => { void this.receive(message).catch(() => { this.counters.messageFailures += 1; }); });
   }
 
   async close(): Promise<void> { this.unsubscribe?.(); this.unsubscribe = undefined; await this.transport.close(); (this.inbox as (InboxStore & { close?: () => void }) | undefined)?.close?.(); (this.outbox as (OutboxStore & { close?: () => void }) | undefined)?.close?.(); }

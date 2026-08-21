@@ -68,6 +68,7 @@ async function main(): Promise<void> {
     const agentStarted = performance.now(); for (let index = 0; index < 100; index += 1) simulation[0]!.route(task(`demo-agent-${index}`)); const agentMs = performance.now() - agentStarted;
     const taskStarted = performance.now(); const dispatched = await Promise.all(Array.from({ length: 1_000 }, (_, index) => simulation[0]!.dispatch(task(`demo-task-${index}`, `sim-${String.fromCharCode(98 + (index % 4))}`)))); const taskMs = performance.now() - taskStarted;
     (metrics.simulation = { nodes: 5, agents: 100, agentRouting: { decisions: 100, elapsedMs: Number(agentMs.toFixed(3)) }, tasks: { dispatched: dispatched.length, elapsedMs: Number(taskMs.toFixed(3)), tasksPerSecond: Number((dispatched.length / (taskMs / 1_000)).toFixed(2)) }, note: 'The 1,000-task run is a bounded authenticated dispatch simulation; the execution sample above invokes real HelixRuntime workers.' });
+    await sleep(100);
     await Promise.all(simulation.map((coordinator) => coordinator.close()));
     console.log(JSON.stringify({ ...metrics, limitations: ['HMAC and in-memory transport are explicit demo fixtures', 'SQLite outbox and leases are local durability mechanisms, not distributed consensus', 'no Byzantine fault tolerance or consensus claim', 'the 1,000-task simulation measures dispatch throughput; 20 tasks exercise the full remote worker path'] }, null, 2));
   } finally {
