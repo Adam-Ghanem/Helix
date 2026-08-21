@@ -37,7 +37,7 @@ export function validatePath(candidate: string, allowedRoots: string[]): string 
   if (!candidate || !allowedRoots.length) throw new Error('A path and at least one allowed root are required');
   const normalized = normalize(resolve(candidate));
   const allowed = allowedRoots.some((root) => { const rootPath = normalize(resolve(root)); const remainder = relative(rootPath, normalized); return remainder === '' || (!remainder.startsWith('..') && !isAbsolute(remainder)); });
-  if (!allowed) throw new Error('Path escapes all allowed roots');
+  if (!allowed) throw new Error('Path escapes all allowed roots (escapes allowed root)');
   return normalized;
 }
 

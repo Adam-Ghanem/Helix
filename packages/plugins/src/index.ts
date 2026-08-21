@@ -69,7 +69,9 @@ export class PluginRegistry {
   }
 
   list(): Array<PluginManifest | PluginRecord> {
-    return [...this.manifests.values()].map((manifest) => structuredClone(manifest)).concat([...this.plugins.values()].map((plugin) => structuredClone(plugin)));
+    const entries: Array<PluginManifest | PluginRecord> = [...this.manifests.values()].map((manifest) => structuredClone(manifest));
+    entries.push(...[...this.plugins.values()].map((plugin) => structuredClone(plugin)));
+    return entries;
   }
 
   authorize(id: string, permission: string): boolean {
