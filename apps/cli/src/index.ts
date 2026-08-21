@@ -48,6 +48,15 @@ function help(): void {
   helix swarm graph <swarmId> [--json]
   helix swarm consensus <swarmId> [--json]
   helix swarm explain <swarmId> [--json]
+  helix federation doctor [--json]
+  helix federation nodes [--json]
+  helix federation node register --name <name> --endpoint <url> --role <role> --capabilities <a,b> [--json]
+  helix federation node drain <nodeId> [--json]
+  helix federation node remove <nodeId> [--json]
+  helix federation status [--json]
+  helix federation metrics [--json]
+  helix federation dispatch <taskId> [--capabilities <a,b>] [--local|--remote] [--json]
+  helix federation leases [--json]
   helix mcp serve [--json]
   helix mcp doctor [--json]
   helix mcp tools [--json]
@@ -147,6 +156,18 @@ async function main(): Promise<void> {
     if (action === 'consensus') return print({ swarmId, message: 'Provide votes through the SDK or governed MCP surface.' });
     if (action === 'explain') return print(orchestrator.explainSwarm(swarmId));
     throw new Error('Usage: helix swarm <create|status|members|scale|rebalance|delegate|handoff|graph|consensus|explain>');
+  }
+  if (command === 'federation') {
+    const action = args[1] ?? 'doctor';
+    if (action === 'doctor') return print({ localNodeId: runtime.federation.localNodeId, status: runtime.federation.status(), deterministic: true, remoteExecution: 'requires injected signer/verifier and transport' });
+    if (action === 'nodes') return print({ nodes: runtime.federation.listNodes() });
+    if (action === 'status') return print(runtime.federation.status());
+    if (action === 'metrics') return print(runtime.federation.metrics());
+    if (action === 'leases') return print({ leases: runtime.federation.listLeases() });
+    if (action === 'node' && args[2] === 'register') { const name = option('--name'); const endpoint = option('--endpoint'); const role = option('--role'); const capabilities = option('--capabilities'); if (!name || !endpoint || !role || !capabilities) throw new Error('Usage: helix federation node register --name <name> --endpoint <url> --role <role> --capabilities <a,b>'); return print(runtime.federation.registerNode({ name, endpoint, role: role as import('../../../packages/federation/src/index.js').FederationNodeRole, capabilities: capabilities.split(',').map((value) => value.trim()).filter(Boolean), ...(option('--trust') ? { trustLevel: option('--trust') as import('../../../packages/federation/src/index.js').FederationTrustLevel } : {}) })); }
+    if (action === 'node' && (args[2] === 'drain' || args[2] === 'remove')) { const nodeId = args[3]; if (!nodeId) throw new Error(`Usage: helix federation node ${args[2]} <nodeId>`); return print(args[2] === 'drain' ? runtime.federation.drainNode(nodeId) : runtime.federation.removeNode(nodeId)); }
+    if (action === 'dispatch') { const taskId = args[2]; if (!taskId) throw new Error('Usage: helix federation dispatch <taskId>'); const capabilities = (option('--capabilities') ?? 'analysis').split(',').map((value) => value.trim()).filter(Boolean); const locality = args.includes('--local') ? 'local' : args.includes('--remote') ? 'remote' : 'any'; return print(await runtime.federation.dispatch({ taskId, requiredCapabilities: capabilities, locality, securityContext: { subject: process.env.HELIX_SUBJECT ?? 'cli-user', permissions: args.includes('--remote') ? ['federation:dispatch'] : ['federation:local'], trustLevel: args.includes('--remote') ? 'TRUSTED' : 'ADMIN' }, authorizationContext: { subject: process.env.HELIX_SUBJECT ?? 'cli-user' } })); }
+    throw new Error('Usage: helix federation <doctor|nodes|node|status|metrics|dispatch|leases>');
   }
   if (command === 'mcp') {
     const mcp = new HelixMcpServer(runtime, { actorRoles: { 'mcp-user': 'viewer', 'mcp-operator': 'operator', 'mcp-admin': 'admin' } });

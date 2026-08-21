@@ -29,7 +29,9 @@
     "intelligence:demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-intelligence-demo.js",
     "intelligence:benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/intelligence.js",
     "swarm:demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-swarm-demo.js",
-    "swarm:benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/swarm.js"
+    "swarm:benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/swarm.js",
+    "federation:demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-federation-demo.js",
+    "federation:benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/federation.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
