@@ -55,7 +55,7 @@ test('cancels pending and running work through AbortSignal', async () => {
       await new Promise<void>((resolve, reject) => {
         signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
       });
-      resolve();
+      return resolve();
     } },
     { id: 'pending', dependsOn: ['long'], run: () => 'never' },
   ], { signal: controller.signal });
