@@ -24,7 +24,9 @@ function help(): void {
   helix memory list [--json]
   helix memory inspect <id> [--json]
   helix memory stats [--json]
+  helix memory compact [--vacuum] [--expired] [--json]
   helix learning agent <agentId> [--json]
+  helix learning flush [--json]
   helix learning hints "<task>" [--json]
   helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
 }
@@ -75,14 +77,16 @@ async function main(): Promise<void> {
     if (action === 'search') { const query = args.slice(2).filter((arg) => arg !== '--json').join(' ').trim(); if (!query) throw new Error('Usage: helix memory search "<query>"'); return print(await runtime.searchMemory({ query, limit: 20, context })); }
     if (action === 'list') return print(await runtime.memory.listEntries(context));
     if (action === 'inspect') { if (!args[2]) throw new Error('Usage: helix memory inspect <id>'); return print(await runtime.getMemory(args[2], context)); }
-    if (action === 'stats') return print(await runtime.memoryStats(context));
-    throw new Error('Usage: helix memory <search|list|inspect|stats>');
+    if (action === 'stats') return print({ stats: await runtime.memoryStats(context), cacheEntries: runtime.memoryCacheSize(), backend: runtime.memory.constructor.name });
+    if (action === 'compact') return print({ result: await runtime.compactMemory({ mergePatterns: true, removeExpiredLegacy: args.includes('--expired'), vacuum: args.includes('--vacuum') }), cacheEntries: runtime.memoryCacheSize() });
+    throw new Error('Usage: helix memory <search|list|inspect|stats|compact>');
   }
   if (command === 'learning') {
     const action = args[1];
     if (action === 'agent') { if (!args[2]) throw new Error('Usage: helix learning agent <agentId>'); return print(await runtime.agentExperience(args[2])); }
     if (action === 'hints') { const task = args.slice(2).filter((arg) => arg !== '--json').join(' ').trim(); if (!task) throw new Error('Usage: helix learning hints "<task>"'); return print(await runtime.learningHints(task, ['analysis'], { subject: process.env.HELIX_SUBJECT ?? 'cli-user' })); }
-    throw new Error('Usage: helix learning <agent|hints>');
+    if (action === 'flush') { await runtime.flushLearning(); return print({ pendingWrites: runtime.learning.pendingWrites }); }
+    throw new Error('Usage: helix learning <agent|hints|flush>');
   }
   if (command === 'sandbox') {
     const action = args[1];

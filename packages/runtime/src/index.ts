@@ -6,7 +6,7 @@ import { defaultPlan, TaskGraph } from '../../planner/src/index.js';
 import { AgentRouter, RoutingCandidate } from '../../router/src/index.js';
 import { PolicyEngine, secureDefaultRules } from '../../policy/src/index.js';
 import { LeaseScheduler } from '../../scheduler/src/index.js';
-import { MemoryQuery, MemoryRecord, MemoryStore, MemoryAccessContext, MemoryEntry, MemoryEntryInput, MemorySearchOptions, TaskOutcomeLearningInput } from '../../memory/src/index.js';
+import { MemoryQuery, MemoryRecord, MemoryBackend, MemoryStore, SqliteMemoryStore, MemoryAccessContext, MemoryCompactionOptions, MemoryCompactionResult, MemoryEntry, MemoryEntryInput, MemorySearchOptions, TaskOutcomeLearningInput } from '../../memory/src/index.js';
 import { PersistentLearningEngine } from '../../learning/src/intelligence.js';
 import { Telemetry } from '../../observability/src/index.js';
 import { defaultAuditFile, SandboxManager } from '../../sandbox/src/index.js';
@@ -91,10 +91,12 @@ export interface RuntimeOptions {
   router?: AgentRouter;
   policy?: PolicyEngine;
   scheduler?: LeaseScheduler;
-  memory?: MemoryStore;
+  memory?: MemoryBackend;
+  useSqliteMemory?: boolean;
   telemetry?: Telemetry;
   sandboxManager?: SandboxManager;
   learning?: PersistentLearningEngine;
+  learningAsync?: boolean;
 }
 
 export interface ExecutionView {
@@ -110,10 +112,11 @@ export class HelixRuntime {
   readonly policy: PolicyEngine;
   readonly scheduler: LeaseScheduler;
   readonly provider: ModelProvider;
-  readonly memory: MemoryStore;
+  readonly memory: MemoryBackend;
   readonly telemetry: Telemetry;
   readonly sandbox: SandboxManager;
   readonly learning: PersistentLearningEngine;
+  readonly learningAsync: boolean;
   private readonly executions = new Map<string, ExecutionRecord>();
   private readonly graphs = new Map<string, TaskGraph>();
   private initialized = false;
@@ -125,10 +128,11 @@ export class HelixRuntime {
     this.policy = options.policy ?? new PolicyEngine(secureDefaultRules);
     this.scheduler = options.scheduler ?? new LeaseScheduler({ stateFile: join(options.dataDirectory, 'helix.leases.json') });
     this.provider = options.provider ?? new DeterministicProvider();
-    this.memory = options.memory ?? new MemoryStore(options.dataDirectory);
+    this.memory = options.memory ?? (options.useSqliteMemory === false ? new MemoryStore(options.dataDirectory) : new SqliteMemoryStore(join(options.dataDirectory, 'helix.memory.sqlite')));
     this.telemetry = options.telemetry ?? new Telemetry();
     this.sandbox = options.sandboxManager ?? new SandboxManager({ auditFile: defaultAuditFile(options.dataDirectory) });
     this.learning = options.learning ?? new PersistentLearningEngine(this.memory);
+    this.learningAsync = options.learningAsync ?? true;
   }
 
   async init(): Promise<void> {
@@ -237,6 +241,16 @@ export class HelixRuntime {
     return this.memory.stats(context);
   }
 
+  async compactMemory(options: MemoryCompactionOptions = {}): Promise<MemoryCompactionResult> {
+    await this.init();
+    if (!this.memory.compact) return { removedDuplicates: 0, removedExpiredLegacy: 0, vacuumed: false };
+    return this.memory.compact(options);
+  }
+
+  memoryCacheSize(): number {
+    return this.memory.cacheSize?.() ?? 0;
+  }
+
   async learningHints(taskType: string, requiredCapabilities: string[], context?: MemoryAccessContext) {
     await this.init();
     return this.learning.suggestRouting({ taskType, requiredCapabilities, complexity: 0.5 }, context);
@@ -250,6 +264,10 @@ export class HelixRuntime {
   async recordLearningOutcome(input: TaskOutcomeLearningInput): Promise<MemoryEntry[]> {
     await this.init();
     return input.success ? this.learning.recordSuccess(input) : this.learning.recordFailure(input);
+  }
+
+  async flushLearning(): Promise<void> {
+    await this.learning.flush();
   }
 
   registerMemoryTools(registry: ToolRegistry): PublicToolDefinition[] {
@@ -409,11 +427,17 @@ export class HelixRuntime {
       graph.setStatus(task.id, 'completed');
       this.agents.recordOutcome(agent.id, { taskType: request.taskType, domain: 'general', success: true, quality: result.quality, latencyMs: Date.now() - taskStarted, tokens: result.tokens, costUsd: result.costUsd });
       await this.events.append({ type: 'task.completed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { result: result.output, evaluation: { success: true, quality: result.quality, provider: this.provider.name } } });
-      try {
-        const learned = await this.learning.recordSuccess({ executionId: execution.id, taskId: task.id, taskType: request.taskType, agentId: agent.id, capabilities: request.requiredCapabilities, success: true, quality: result.quality, executionTimeMs: Date.now() - taskStarted, attempts: task.attempts + 1, output: result.output });
-        await this.events.append({ type: 'learning.outcome.recorded', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { success: true, memoryIds: learned.map((entry) => entry.id) } });
-      } catch (learningError) {
-        await this.events.append({ type: 'learning.persistence.failed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { error: learningError instanceof Error ? learningError.message : String(learningError) } });
+      const learningInput = { executionId: execution.id, taskId: task.id, taskType: request.taskType, agentId: agent.id, capabilities: request.requiredCapabilities, success: true, quality: result.quality, executionTimeMs: Date.now() - taskStarted, attempts: task.attempts + 1, output: result.output };
+      if (this.learningAsync) {
+        this.learning.enqueueSuccess(learningInput);
+        await this.events.append({ type: 'learning.outcome.queued', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { success: true, pendingWrites: this.learning.pendingWrites } });
+      } else {
+        try {
+          const learned = await this.learning.recordSuccess(learningInput);
+          await this.events.append({ type: 'learning.outcome.recorded', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { success: true, memoryIds: learned.map((entry) => entry.id) } });
+        } catch (learningError) {
+          await this.events.append({ type: 'learning.persistence.failed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { error: learningError instanceof Error ? learningError.message : String(learningError) } });
+        }
       }
     } catch (error) {
       graph.update(task.id, { error: error instanceof Error ? error.message : String(error) });
@@ -421,11 +445,17 @@ export class HelixRuntime {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.agents.recordOutcome(agent.id, { taskType: request.taskType, domain: 'general', success: false, quality: 0, latencyMs: Date.now() - taskStarted, tokens: 0 });
       await this.events.append({ type: 'task.failed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { error: errorMessage } });
-      try {
-        const learned = await this.learning.recordFailure({ executionId: execution.id, taskId: task.id, taskType: request.taskType, agentId: agent.id, capabilities: request.requiredCapabilities, success: false, quality: 0, executionTimeMs: Date.now() - taskStarted, attempts: task.attempts + 1, error: errorMessage });
-        await this.events.append({ type: 'learning.outcome.recorded', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { success: false, memoryIds: learned.map((entry) => entry.id) } });
-      } catch (learningError) {
-        await this.events.append({ type: 'learning.persistence.failed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { error: learningError instanceof Error ? learningError.message : String(learningError) } });
+      const learningInput = { executionId: execution.id, taskId: task.id, taskType: request.taskType, agentId: agent.id, capabilities: request.requiredCapabilities, success: false, quality: 0, executionTimeMs: Date.now() - taskStarted, attempts: task.attempts + 1, error: errorMessage };
+      if (this.learningAsync) {
+        this.learning.enqueueFailure(learningInput);
+        await this.events.append({ type: 'learning.outcome.queued', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { success: false, pendingWrites: this.learning.pendingWrites } });
+      } else {
+        try {
+          const learned = await this.learning.recordFailure(learningInput);
+          await this.events.append({ type: 'learning.outcome.recorded', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { success: false, memoryIds: learned.map((entry) => entry.id) } });
+        } catch (learningError) {
+          await this.events.append({ type: 'learning.persistence.failed', executionId: execution.id, taskId: task.id, agentId: agent.id, payload: { error: learningError instanceof Error ? learningError.message : String(learningError) } });
+        }
       }
     } finally {
       if (lease) this.scheduler.release(lease.id);

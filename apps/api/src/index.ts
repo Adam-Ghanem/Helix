@@ -96,6 +96,14 @@ const server = createServer(async (request, response) => {
       const record = await runtime.remember({ namespace: typeof input.namespace === 'string' ? input.namespace : 'default', owner: typeof input.owner === 'string' ? input.owner : 'api-user', content: input.content, importance: typeof input.importance === 'number' ? Math.max(0, Math.min(1, input.importance)) : 0.5, confidence: typeof input.confidence === 'number' ? Math.max(0, Math.min(1, input.confidence)) : 0.5, source: isRecord(input.source) ? input.source : {}, ...(typeof input.expiresAt === 'string' ? { expiresAt: input.expiresAt } : {}), allowedSubjects: Array.isArray(input.allowedSubjects) ? input.allowedSubjects.filter((value): value is string => typeof value === 'string') : ['api-user'] });
       return json(response, 201, record);
     }
+    if (url.pathname === '/api/v1/memory/compact' && request.method === 'POST') {
+      const input = await body(request);
+      return json(response, 200, { result: await runtime.compactMemory({ mergePatterns: input.mergePatterns !== false, removeExpiredLegacy: input.removeExpiredLegacy === true, vacuum: input.vacuum === true }), cacheEntries: runtime.memoryCacheSize() });
+    }
+    if (url.pathname === '/api/v1/learning/flush' && request.method === 'POST') {
+      await runtime.flushLearning();
+      return json(response, 200, { pendingWrites: runtime.learning.pendingWrites });
+    }
     const memoryMatch = url.pathname.match(/^\/api\/v1\/memory\/([^/]+)$/);
     if (memoryMatch && request.method === 'GET') return json(response, 200, await runtime.getMemory(memoryMatch[1]!, { subject: request.headers['x-helix-subject']?.toString() ?? 'api-user' }));
     if (memoryMatch && request.method === 'DELETE') { await runtime.deleteMemory(memoryMatch[1]!, { subject: request.headers['x-helix-subject']?.toString() ?? 'api-user' }); return json(response, 204, { deleted: true }); }
