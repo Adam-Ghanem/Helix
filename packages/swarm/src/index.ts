@@ -62,3 +62,5 @@ export class SwarmCoordinator {
     return tasks.length >= 3 ? 'ensemble' : 'pipeline';
   }
 }
+
+export * from './autonomous.js';

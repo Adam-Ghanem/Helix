@@ -31,12 +31,14 @@ export class AgentRegistry {
     if (seed) for (const [name, role, capabilities] of CATALOG) this.register({ name, role, capabilities });
   }
 
-  register(input: { name: string; role: string; capabilities: string[]; permissions?: string[]; model?: string; provider?: string }): AgentProfile {
+  register(input: { name: string; role: string; capabilities: string[]; permissions?: string[]; model?: string; provider?: string; specialization?: string; systemInstructions?: string }): AgentProfile {
     const profile: AgentProfile = {
       id: id('agent'),
       name: input.name,
       role: input.role,
       capabilities: [...new Set(input.capabilities)],
+      specialization: input.specialization ?? input.role,
+      systemInstructions: input.systemInstructions ?? `Operate as a ${input.role} specialist. Follow Helix policy, use only authorized tools, and report evidence without revealing private reasoning.`,
       ...(input.model ? { model: input.model } : {}),
       ...(input.provider ? { provider: input.provider } : {}),
       permissions: [...(input.permissions ?? [])],

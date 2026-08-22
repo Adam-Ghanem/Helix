@@ -15,6 +15,6 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["apps/**/*.ts", "packages/**/*.ts", "tests/**/*.ts", "schemas/**/*.ts"],
+    "include": ["apps/**/*.ts", "packages/**/*.ts", "tests/**/*.ts", "examples/**/*.ts", "benchmarks/**/*.ts", "schemas/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }
