@@ -98,6 +98,10 @@ const server = createServer(async (request, response) => {
     if (sessionMatch && request.method === 'GET' && !sessionMatch[2]) return json(response, 200, runtime.controlPlane.sessions.get(sessionMatch[1]!));
     if (sessionMatch && request.method === 'POST' && sessionMatch[2]) { const sessionId = sessionMatch[1]!; const action = sessionMatch[2]!; if (action === 'start') return json(response, 200, await runtime.controlPlane.sessions.start(sessionId)); if (action === 'stop') return json(response, 200, await runtime.controlPlane.sessions.stop(sessionId)); return json(response, 200, await runtime.controlPlane.sessions.execute(sessionId)); }
     if (url.pathname === '/api/v1/agents' && request.method === 'GET') return json(response, 200, { agents: runtime.agents.list() });
+    const agentRunMatch = url.pathname.match(/^\/api\/v1\/agents\/([^/]+)\/run$/);
+    if (agentRunMatch && request.method === 'POST') { const input = await body(request); if (typeof input.task !== 'string' || !input.task.trim()) return json(response, 400, { error: 'task is required' }); return json(response, 201, await runtime.runAgent(agentRunMatch[1]!, { title: input.task, ...(typeof input.description === 'string' ? { description: input.description } : {}) }, { ...(typeof input.goal === 'string' ? { goal: input.goal } : {}), ...(typeof input.sessionId === 'string' ? { sessionId: input.sessionId } : {}), ...(typeof input.swarmId === 'string' ? { swarmId: input.swarmId } : {}), ...(typeof input.noMemory === 'boolean' || typeof input.maxIterations === 'number' || typeof input.maxToolCalls === 'number' || typeof input.maxExecutionTimeMs === 'number' ? { config: { ...(typeof input.noMemory === 'boolean' ? { noMemory: input.noMemory } : {}), ...(typeof input.maxIterations === 'number' ? { maxIterations: input.maxIterations } : {}), ...(typeof input.maxToolCalls === 'number' ? { maxToolCalls: input.maxToolCalls } : {}), ...(typeof input.maxExecutionTimeMs === 'number' ? { maxExecutionTimeMs: input.maxExecutionTimeMs } : {}) } } : {}) })); }
+    const agentExecutionsMatch = url.pathname.match(/^\/api\/v1\/agents\/([^/]+)\/executions$/);
+    if (agentExecutionsMatch && request.method === 'GET') return json(response, 200, { executions: runtime.listAgentExecutions().filter((execution) => execution.agentId === agentExecutionsMatch[1]) });
     if (url.pathname === '/api/v1/goals' && request.method === 'GET') return json(response, 200, { goals: [...orchestrator.goals.values()] });
     if (url.pathname === '/api/v1/goals' && request.method === 'POST') { const input = await body(request); if (typeof input.title !== 'string' || !input.title.trim()) return json(response, 400, { error: 'title is required' }); const constraints = isRecord(input.constraints) ? input.constraints as GoalConstraints : undefined; return json(response, 201, await orchestrator.createGoal({ title: input.title, ...(typeof input.description === 'string' ? { description: input.description } : {}), ...(constraints ? { constraints } : {}), ...(Array.isArray(input.requiredCapabilities) ? { requiredCapabilities: input.requiredCapabilities.filter((value): value is string => typeof value === 'string') } : {}), ...(typeof input.priority === 'number' ? { priority: input.priority } : {}), ...(typeof input.urgency === 'number' ? { urgency: input.urgency } : {}), ...(typeof input.risk === 'string' ? { risk: input.risk as GoalRisk } : {}), ...(typeof input.expectedOutcome === 'string' ? { expectedOutcome: input.expectedOutcome } : {}) })); }
     const goalActionMatch = url.pathname.match(/^\/api\/v1\/goals\/([^/]+)\/(analyze|plan)$/);
@@ -198,7 +202,7 @@ const server = createServer(async (request, response) => {
       const action = lifecycleMatch[2]!;
       if (action === 'pause') return json(response, 200, await runtime.pause(executionId));
       if (action === 'resume') return json(response, 200, await runtime.resume(executionId));
-      if (action === 'cancel') return json(response, 200, await runtime.cancel(executionId));
+      if (action === 'cancel') return json(response, 200, (await runtime.cancelAgentExecution(executionId)) ? { executionId, status: 'cancellation_requested' } : await runtime.cancel(executionId));
       if (action === 'retry') return json(response, 200, await runtime.retry(executionId));
       return json(response, 200, await runtime.checkpoint(executionId));
     }
@@ -213,7 +217,7 @@ const server = createServer(async (request, response) => {
     const executionTraceMatch = url.pathname.match(/^\/api\/v1\/executions\/([^/]+)\/trace$/);
     if (executionTraceMatch && request.method === 'GET') return json(response, 200, await runtime.controlPlane.trace(executionTraceMatch[1]!));
     const executionMatch = url.pathname.match(/^\/api\/v1\/executions\/([^/]+)$/);
-    if (executionMatch && request.method === 'GET') return json(response, 200, await runtime.view(executionMatch[1]!));
+    if (executionMatch && request.method === 'GET') { try { return json(response, 200, runtime.getAgentExecution(executionMatch[1]!)); } catch { return json(response, 200, await runtime.view(executionMatch[1]!)); } }
     if (url.pathname === '/api/v1/events' && request.method === 'GET') return json(response, 200, { events: await runtime.events.read() });
     if (url.pathname === '/api/v1/recover' && request.method === 'POST') return json(response, 200, { recovered: await runtime.recover(), sequence: runtime.events.lastSequence });
     if (url.pathname === '/api/v1/sandboxes' && request.method === 'GET') return json(response, 200, { sandboxes: runtime.sandbox.list() });

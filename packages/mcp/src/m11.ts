@@ -143,10 +143,15 @@ export class McpCapabilityBridge {
     return this.filesystem(action, input);
   }
 
-  private agent(action: string, input: Record<string, unknown>, subject: string): unknown {
+  private async agent(action: string, input: Record<string, unknown>, subject: string): Promise<unknown> {
     const list = () => this.runtime.agents.list();
     if (action === 'list' || action === 'metrics' || action === 'health' || action === 'logs') return { agents: list(), count: list().length, subject };
     if (action === 'get' || action === 'status' || action === 'capabilities' || action === 'reputation') { const agent = list().find((candidate) => candidate.id === stringInput(input, 'agentId')); if (!agent) throw new McpToolError('NOT_FOUND', 'agent not found'); return agent; }
+    if (action === 'run') { const agentId = stringInput(input, 'agentId'); const task = stringInput(input, 'task'); return this.runtime.runAgent(agentId, { title: task, ...(typeof input.description === 'string' ? { description: input.description } : {}) }, { ...(typeof input.goal === 'string' ? { goal: input.goal } : {}), config: { ...(typeof input.maxIterations === 'number' ? { maxIterations: input.maxIterations } : {}), ...(typeof input.maxToolCalls === 'number' ? { maxToolCalls: input.maxToolCalls } : {}), ...(typeof input.timeoutMs === 'number' ? { maxExecutionTimeMs: input.timeoutMs } : {}), ...(input.noMemory === true ? { noMemory: true } : {}) } }); }
+    if (action === 'execution') return this.runtime.getAgentExecution(stringInput(input, 'executionId'));
+    if (action === 'executions') return { executions: this.runtime.listAgentExecutions() };
+    if (action === 'tool-history') { const executionId = stringInput(input, 'executionId'); return { executionId, events: (await this.runtime.events.read((event) => event.executionId === executionId && event.type.startsWith('agent.tool.'))).slice(-100) }; }
+    if (action === 'cancel') { const executionId = stringInput(input, 'executionId'); return { executionId, cancelled: await this.runtime.cancelAgentExecution(executionId) }; }
     if (action === 'spawn') return this.runtime.agents.register({ name: stringInput(input, 'name'), role: stringInput(input, 'role', 'worker'), capabilities: stringArrayInput(input, 'capabilities', ['analysis']) });
     if (action === 'pause' || action === 'resume' || action === 'stop') { const id = stringInput(input, 'agentId'); this.runtime.agents.setStatus(id, action === 'stop' ? 'offline' : 'idle'); return { agentId: id, status: action === 'pause' ? 'paused' : action === 'resume' ? 'idle' : 'offline' }; }
     return { agents: list(), action, subject };
@@ -276,7 +281,7 @@ export class McpCapabilityBridge {
 }
 
 const familyActions: Record<McpFamily, string[]> = {
-  agents: ['list', 'get', 'status', 'metrics', 'spawn', 'pause', 'resume', 'stop', 'capabilities', 'reputation', 'health', 'logs'],
+  agents: ['list', 'get', 'status', 'metrics', 'spawn', 'pause', 'resume', 'stop', 'capabilities', 'reputation', 'health', 'logs', 'run', 'cancel', 'execution', 'executions', 'tool-history'],
   tasks: ['create', 'get', 'list', 'cancel', 'retry', 'dependencies', 'status', 'history', 'result', 'inspect', 'assign', 'validate'],
   scheduler: ['tick', 'start', 'stop', 'metrics', 'queue', 'assignments', 'heartbeat', 'release'],
   workers: ['list', 'status', 'metrics', 'run_once', 'drain', 'cancel', 'snapshot', 'pool_status'],
@@ -303,6 +308,8 @@ const familyActions: Record<McpFamily, string[]> = {
 const actionSchema = (family: McpFamily, action: string): z.ZodRawShape => {
   const shape: z.ZodRawShape = { limit: z.number().int().min(1).max(1000).optional() };
   if (['get', 'status', 'capabilities', 'reputation', 'pause', 'resume', 'stop', 'logs'].includes(action) && family === 'agents') shape.agentId = z.string().min(1);
+  if (family === 'agents' && action === 'run') { shape.agentId = z.string().min(1); shape.task = z.string().min(1); shape.description = z.string().optional(); shape.goal = z.string().optional(); shape.maxIterations = z.number().int().positive().max(100).optional(); shape.maxToolCalls = z.number().int().nonnegative().max(500).optional(); shape.timeoutMs = z.number().int().positive().max(900_000).optional(); shape.noMemory = z.boolean().optional(); }
+  if (family === 'agents' && ['execution', 'cancel', 'tool-history'].includes(action)) shape.executionId = z.string().min(1);
   if (['get', 'cancel', 'retry', 'dependencies', 'status', 'result', 'inspect', 'assign'].includes(action) && family === 'tasks') shape.taskId = z.string().min(1).optional();
   if (['heartbeat', 'release'].includes(action)) shape.leaseId = z.string().min(1);
   if (family === 'agents' && action === 'spawn') { shape.name = z.string().min(1); shape.role = z.string().min(1).optional(); shape.capabilities = z.array(z.string()).optional(); }
@@ -325,7 +332,7 @@ const actionSchema = (family: McpFamily, action: string): z.ZodRawShape => {
 };
 
 function riskFor(family: McpFamily, action: string): McpRisk {
-  if ((family === 'sandbox' && action === 'run') || (family === 'intelligence' && (action === 'plan_execute' || action === 'orchestrator_run'))) return 'EXECUTE';
+  if ((family === 'sandbox' && action === 'run') || (family === 'agents' && action === 'run') || (family === 'intelligence' && (action === 'plan_execute' || action === 'orchestrator_run'))) return 'EXECUTE';
   if (family === 'federation' && ['send', 'task_dispatch', 'task_cancel', 'task_retry'].includes(action)) return 'REMOTE';
   if (family === 'federation' && ['runtime_start', 'runtime_stop', 'outbox_retry'].includes(action)) return 'WRITE';
   if (['approve', 'deny', 'reload', 'roles', 'permissions', 'secrets', 'trust', 'config'].includes(action) || ['security', 'policy'].includes(family) && ['approve', 'deny', 'reload'].includes(action)) return 'ADMIN';
@@ -378,7 +385,7 @@ export class HelixMcpServer {
   readonly bridge: McpCapabilityBridge;
   readonly registry: McpToolRegistry;
   readonly sdkServer: McpServer;
-  readonly resources = ['helix://agents', 'helix://tasks', 'helix://scheduler', 'helix://swarm', 'helix://memory', 'helix://metrics', 'helix://events', 'helix://system', 'helix://goals', 'helix://plans', 'helix://orchestrations', 'helix://swarms', 'helix://swarm-collaboration', 'helix://federation-nodes', 'helix://federation-status', 'helix://federation-metrics', 'helix://control-plane', 'helix://control-events', 'helix://control-traces'];
+  readonly resources = ['helix://agents', 'helix://tasks', 'helix://scheduler', 'helix://swarm', 'helix://memory', 'helix://metrics', 'helix://events', 'helix://system', 'helix://goals', 'helix://plans', 'helix://orchestrations', 'helix://swarms', 'helix://swarm-collaboration', 'helix://federation-nodes', 'helix://federation-status', 'helix://federation-metrics', 'helix://control-plane', 'helix://control-events', 'helix://control-traces', 'helix://agent-executions'];
   readonly prompts = ['helix_plan_task', 'helix_review_result', 'helix_debug_task', 'helix_security_review', 'helix_swarm_plan', 'helix_memory_recall', 'helix_plan_goal', 'helix_review_plan', 'helix_debug_plan', 'helix_replan_failure', 'helix_federation_recovery', 'helix_federation_security'];
   constructor(readonly runtime: HelixRuntime, options: { actorRoles?: Record<string, SecurityRole>; rateLimits?: Record<McpRisk, number> } = {}) {
     this.bridge = new McpCapabilityBridge(runtime); this.registry = new McpToolRegistry(undefined, undefined, new RateLimiter(options.rateLimits));
@@ -387,11 +394,11 @@ export class HelixMcpServer {
     this.sdkServer = this.createSdkServer();
   }
   private createSdkServer(): McpServer {
-    const server = new McpServer({ name: 'helix-m16', version: '0.16.0' });
+    const server = new McpServer({ name: 'helix-m17', version: '0.17.0' });
     for (const definition of this.registry.list()) server.registerTool(definition.name, { description: `${definition.description}. Risk=${definition.risk}.`, inputSchema: definition.inputSchema }, async (input) => {
       const actorId = process.env.HELIX_MCP_ACTOR ?? 'mcp-user'; const actor = { id: actorId, role: this.registry.authorization.role(actorId) }; try { return text(await this.registry.execute(definition.name, input as Record<string, unknown>, { actor, requestId: randomUUID() })); } catch (error) { const safe = safeError(error); return { ...text({ error: { category: safe.category, message: safe.message } }), isError: true }; }
     });
-    const resourceData = async (uri: string): Promise<unknown> => { const actorId = process.env.HELIX_MCP_ACTOR ?? 'mcp-user'; if (!this.registry.authorization.check({ id: actorId, role: this.registry.authorization.role(actorId) }, 'READ')) throw new McpToolError('FORBIDDEN', 'resource authorization denied'); if (uri.endsWith('/agents')) return this.runtime.agents.list(); if (uri.endsWith('/federation-nodes')) return this.runtime.federation.listNodes(); if (uri.endsWith('/federation-status')) return this.runtime.federation.status(); if (uri.endsWith('/federation-metrics')) return this.runtime.federation.metrics(); if (uri.endsWith('/swarms')) return this.runtime.swarms.list(); if (uri.endsWith('/swarm-collaboration')) return this.runtime.swarms.list().map((swarm) => ({ swarmId: swarm.id, graph: this.runtime.swarms.collaboration(swarm.id) })); if (uri.endsWith('/memory')) return this.runtime.memoryStats({ subject: actorId }); if (uri.endsWith('/metrics')) return this.runtime.controlPlane.metrics.snapshot(); if (uri.endsWith('/events')) return this.runtime.controlPlane.listEvents({ limit: 100 }); if (uri.endsWith('/control-plane')) return this.runtime.controlPlane.snapshot(); if (uri.endsWith('/control-events')) return this.runtime.controlPlane.listEvents({ limit: 100 }); if (uri.endsWith('/control-traces')) return this.runtime.controlPlane.listTraces(100); if (uri.endsWith('/system')) return { provider: this.runtime.provider.name, memory: this.runtime.memory.constructor.name }; if (uri.endsWith('/scheduler')) return this.runtime.scheduler.list(); return { uri, available: true, protected: true }; };
+    const resourceData = async (uri: string): Promise<unknown> => { const actorId = process.env.HELIX_MCP_ACTOR ?? 'mcp-user'; if (!this.registry.authorization.check({ id: actorId, role: this.registry.authorization.role(actorId) }, 'READ')) throw new McpToolError('FORBIDDEN', 'resource authorization denied'); if (uri.endsWith('/agents')) return this.runtime.agents.list(); if (uri.endsWith('/federation-nodes')) return this.runtime.federation.listNodes(); if (uri.endsWith('/federation-status')) return this.runtime.federation.status(); if (uri.endsWith('/federation-metrics')) return this.runtime.federation.metrics(); if (uri.endsWith('/swarms')) return this.runtime.swarms.list(); if (uri.endsWith('/swarm-collaboration')) return this.runtime.swarms.list().map((swarm) => ({ swarmId: swarm.id, graph: this.runtime.swarms.collaboration(swarm.id) })); if (uri.endsWith('/memory')) return this.runtime.memoryStats({ subject: actorId }); if (uri.endsWith('/metrics')) return this.runtime.controlPlane.metrics.snapshot(); if (uri.endsWith('/events')) return this.runtime.controlPlane.listEvents({ limit: 100 }); if (uri.endsWith('/control-plane')) return this.runtime.controlPlane.snapshot(); if (uri.endsWith('/control-events')) return this.runtime.controlPlane.listEvents({ limit: 100 }); if (uri.endsWith('/control-traces')) return this.runtime.controlPlane.listTraces(100); if (uri.endsWith('/agent-executions')) return this.runtime.listAgentExecutions(); if (uri.endsWith('/system')) return { provider: this.runtime.provider.name, memory: this.runtime.memory.constructor.name }; if (uri.endsWith('/scheduler')) return this.runtime.scheduler.list(); return { uri, available: true, protected: true }; };
     for (const uri of this.resources) server.registerResource(uri.replace('helix://', 'helix_'), uri, { description: `Authorized Helix resource ${uri}`, mimeType: 'application/json' }, async (requestedUri) => ({ contents: [{ uri: requestedUri.href, text: JSON.stringify(await resourceData(requestedUri.href)) }] }));
     server.registerPrompt('helix_plan_task', { description: 'Create a bounded, policy-aware task planning prompt', argsSchema: { goal: z.string(), constraints: z.string().optional() } }, async ({ goal, constraints }) => ({ messages: [{ role: 'user', content: { type: 'text', text: `Plan Helix task: ${goal}. Constraints: ${constraints ?? 'respect capability, budget, policy, and sandbox boundaries.'}` } }] }));
     server.registerPrompt('helix_review_result', { description: 'Review a result using structured evidence', argsSchema: { result: z.string(), criteria: z.string().optional() } }, async ({ result, criteria }) => ({ messages: [{ role: 'user', content: { type: 'text', text: `Review result with evidence. Result: ${result}. Criteria: ${criteria ?? 'correctness, safety, provenance, and completeness.'}` } }] }));

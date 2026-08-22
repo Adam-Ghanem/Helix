@@ -75,6 +75,8 @@ export interface AgentProfile {
   name: string;
   role: string;
   capabilities: string[];
+  specialization?: string;
+  systemInstructions?: string;
   model?: string;
   provider?: string;
   permissions: string[];

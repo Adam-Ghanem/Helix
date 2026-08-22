@@ -1,4 +1,5 @@
-import { join } from 'node:path';
+import { readdir, readFile } from 'node:fs/promises';
+import { resolve, relative, join, sep } from 'node:path';
 import { AgentRegistry } from '../../agents/src/index.js';
 import { EventStore } from '../../durable/src/index.js';
 import { DEFAULT_BUDGET, EventEnvelope, ExecutionInput, ExecutionRecord, ResourceUsage, StructuredDecision, TaskRecord, ToolRequest, id, timestamp, withDefaultBudget } from '../../core/src/index.js';
@@ -19,6 +20,8 @@ import { DynamicSwarmManager } from '../../swarm/src/index.js';
 import { FederationCoordinator, FederationNodeRuntime, HmacMessageSigner, HmacMessageVerifier, SqliteInboxStore, SqliteOutboxStore } from '../../federation/src/index.js';
 import { ControlPlaneController } from '../../control-plane/src/index.js';
 import type { FederationExecutionOutcome, FederationRuntimeOptions, FederationSecurityContext, FederationTimeoutKind } from '../../federation/src/index.js';
+import { AgentRuntime } from '../../agent-runtime/src/index.js';
+import type { AgentProviderInput, AgentProviderResponse, AgentExecutionResult, AgentTaskInput, AgentToolDefinition } from '../../agent-runtime/src/index.js';
 
 export interface ProviderResult {
   output: unknown;
@@ -69,23 +72,37 @@ export class HttpModelProvider implements ModelProvider {
       clearTimeout(timer);
     }
   }
+
+  async executeAgent(input: AgentProviderInput): Promise<AgentProviderResponse> {
+    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(`${this.endpoint}/chat/completions`, { method: 'POST', signal: controller.signal, headers: { authorization: `Bearer ${this.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: this.model, messages: input.context.history, tools: input.tools.map((tool) => ({ type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } })), temperature: 0.2 }) });
+      if (!response.ok) throw new Error(`Model provider returned HTTP ${response.status}`);
+      const payload = await response.json() as { choices?: Array<{ message?: { content?: string; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } }>; usage?: { total_tokens?: number } };
+      const message = payload.choices?.[0]?.message; const toolCall = message?.tool_calls?.[0];
+      if (toolCall?.function?.name) return { decision: { type: 'tool_call', toolName: toolCall.function.name, arguments: parseArguments(toolCall.function.arguments) }, usage: { tokens: payload.usage?.total_tokens ?? 0, costUsd: 0, model: this.model } };
+      const content = message?.content; if (typeof content !== 'string') throw new Error('Model provider returned no structured agent decision');
+      try { const parsed = JSON.parse(content) as AgentProviderResponse['decision']; if (parsed && typeof parsed === 'object' && 'type' in parsed) return { decision: parsed, usage: { tokens: payload.usage?.total_tokens ?? 0, costUsd: 0, model: this.model } }; } catch { /* plain assistant content is a final answer */ }
+      return { decision: { type: 'final', content }, usage: { tokens: payload.usage?.total_tokens ?? 0, costUsd: 0, model: this.model } };
+    } catch (error) { if (error instanceof Error && error.name === 'AbortError') throw new Error(`Model provider timed out after ${this.timeoutMs}ms`); throw error; } finally { clearTimeout(timer); }
+  }
 }
+
+function parseArguments(value?: string): Record<string, unknown> { if (!value) return {}; try { const parsed = JSON.parse(value) as unknown; return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; } catch { throw new Error('Model provider returned invalid tool arguments'); } }
+function safeWorkspacePath(root: string, requested: string): string { const target = resolve(root, requested); const relativePath = relative(root, target); if (relativePath.startsWith('..') || relativePath.includes(`..${sep}`)) throw new Error('filesystem path escapes workspace'); return target; }
 
 export class DeterministicProvider implements ModelProvider {
   readonly name = 'deterministic-local';
 
   async execute(input: { goal: string; task: TaskRecord; agent: string }): Promise<ProviderResult> {
-    return {
-      output: {
-        summary: `${input.task.title} completed within Helix’s local execution boundary`,
-        goal: input.goal,
-        assignedAgent: input.agent,
-        evidence: ['provider-neutral deterministic execution'],
-      },
-      tokens: 0,
-      costUsd: 0,
-      quality: 0.75,
-    };
+    return { output: { summary: `${input.task.title} completed within Helix’s local execution boundary`, goal: input.goal, assignedAgent: input.agent, evidence: ['provider-neutral deterministic execution'] }, tokens: 0, costUsd: 0, quality: 0.75 };
+  }
+
+  async executeAgent(input: AgentProviderInput): Promise<AgentProviderResponse> {
+    const lower = `${input.goal} ${input.task.title} ${input.task.description}`.toLowerCase(); const names = new Set(input.tools.map((tool) => tool.name));
+    if (input.iteration === 1 && (lower.includes('inspect') || lower.includes('project') || lower.includes('file')) && names.has('filesystem.list')) return { decision: { type: 'tool_call', toolName: 'filesystem.list', arguments: { path: '.' } }, usage: { tokens: 0, costUsd: 0, model: 'deterministic-local' } };
+    if (input.iteration === 2 && names.has('filesystem.read')) return { decision: { type: 'tool_call', toolName: 'filesystem.read', arguments: { path: 'README.md' } }, usage: { tokens: 0, costUsd: 0, model: 'deterministic-local' } };
+    return { decision: { type: 'final', content: `Deterministic agent ${input.agent.name} completed: ${input.task.title}` }, usage: { tokens: 0, costUsd: 0, model: 'deterministic-local' } };
   }
 }
 
@@ -159,12 +176,15 @@ export class HelixRuntime {
   readonly federation: FederationCoordinator;
   readonly federationRuntime: FederationNodeRuntime;
   readonly controlPlane: ControlPlaneController;
+  readonly agentRuntime: AgentRuntime;
   readonly learningAsync: boolean;
   private readonly executions = new Map<string, ExecutionRecord>();
   private readonly graphs = new Map<string, TaskGraph>();
   private readonly federatedInputs = new Map<string, FederatedRuntimeTaskInput>();
   private readonly federatedTaskExecutions = new Map<string, string>();
   private readonly federatedControllers = new Map<string, AbortController>();
+  private readonly agentControllers = new Map<string, AbortController>();
+  private readonly agentExecutionResults = new Map<string, AgentExecutionResult>();
   private initialized = false;
 
   constructor(options: RuntimeOptions) {
@@ -189,6 +209,9 @@ export class HelixRuntime {
     this.federationRuntime = new FederationNodeRuntime({ runtime: this, coordinator: this.federation, ...(options.federationRuntime ?? {}) });
     this.learningAsync = options.learningAsync ?? true;
     this.controlPlane = new ControlPlaneController(this);
+    this.policy.addRule({ resource: 'memory.search', action: 'allow', subjects: ['*'] }); this.policy.addRule({ resource: 'filesystem.list', action: 'allow', subjects: ['*'] }); this.policy.addRule({ resource: 'filesystem.read', action: 'allow', subjects: ['*'] });
+    this.agentRuntime = new AgentRuntime({ provider: this.provider, agents: this.agents, recallMemory: async (input) => (await this.searchMemory({ query: input.query, limit: input.limit, context: { subject: input.agentId, agentId: input.agentId } })).map((result) => ({ id: result.entry.id, content: result.entry.content, explanation: result.explanation, confidence: result.entry.confidence })), recordLearning: async (input) => (await this.recordLearningOutcome(input)).length, requestTool: (request) => this.requestTool(request), appendEvent: async (event) => { await this.events.append({ type: event.type, ...(event.executionId ? { executionId: event.executionId } : {}), ...(event.taskId ? { taskId: event.taskId } : {}), ...(event.agentId ? { agentId: event.agentId } : {}), payload: event.payload }); } });
+    this.registerAgentTools();
   }
 
   async init(): Promise<void> {
@@ -311,6 +334,7 @@ export class HelixRuntime {
   }
 
   createOrchestrator(options: OrchestratorOptions = {}): HelixOrchestrator { return new HelixOrchestrator(this, options); }
+  async runAgent(agentId: string, task: { title: string; description?: string }, options: { goal?: string; sessionId?: string; swarmId?: string; config?: import('../../agent-runtime/src/index.js').AgentRuntimeConfig; metadata?: Record<string, unknown> } = {}): Promise<AgentExecutionResult> { await this.init(); const executionId = id('agent-execution'); const taskId = id('agent-task'); const controller = new AbortController(); const requestedSignal = options.config?.signal; const signal = requestedSignal ? AbortSignal.any([controller.signal, requestedSignal]) : controller.signal; const lease = this.scheduler.acquire(taskId, agentId); if (!lease) throw new Error(`Scheduler rejected agent task ${taskId}`); this.agents.setStatus(agentId, 'busy'); this.agentControllers.set(executionId, controller); await this.events.append({ type: 'execution.started', executionId, agentId, payload: { executionId, taskId, agentId, goal: options.goal ?? task.title, runtime: 'agent-runtime', leaseId: lease.id } }); try { const result = await this.agentRuntime.run({ taskId, executionId, goal: options.goal ?? task.title, title: task.title, description: task.description ?? task.title, agentId, signal, ...(options.sessionId ? { sessionId: options.sessionId } : {}), ...(options.swarmId ? { swarmId: options.swarmId } : {}), ...(options.config ? { config: options.config } : {}), ...(options.metadata ? { metadata: options.metadata } : {}) }, { ...(options.config ?? {}), signal }); this.agentExecutionResults.set(executionId, structuredClone(result)); await this.events.append({ type: result.status === 'completed' ? 'execution.completed' : result.status === 'cancelled' ? 'execution.cancelled' : 'execution.failed', executionId, agentId, payload: { result: { ...result, output: result.output ? result.output.slice(0, 8_192) : undefined } } }); return result; } finally { this.scheduler.release(lease.id); this.agents.setStatus(agentId, 'idle'); this.agentControllers.delete(executionId); } }
   async startFederationRuntime() { return this.federationRuntime.start(); }
   async stopFederationRuntime() { return this.federationRuntime.stop(); }
   federationRuntimeStatus() { return this.federationRuntime.status(); }
@@ -378,6 +402,20 @@ export class HelixRuntime {
   async recordLearningOutcome(input: TaskOutcomeLearningInput): Promise<MemoryEntry[]> {
     await this.init();
     return input.success ? this.learning.recordSuccess(input) : this.learning.recordFailure(input);
+  }
+
+  listAgentExecutions(): AgentExecutionResult[] { return structuredClone([...this.agentExecutionResults.values()]); }
+  getAgentExecution(executionId: string): AgentExecutionResult { const result = this.agentExecutionResults.get(executionId); if (!result) throw new Error(`Unknown agent execution: ${executionId}`); return structuredClone(result); }
+  async cancelAgentExecution(executionId: string): Promise<boolean> { const controller = this.agentControllers.get(executionId); if (!controller) return false; controller.abort(); return true; }
+
+  private registerAgentTools(): void {
+    this.agentRuntime.registerTools([
+      { name: 'memory.search', description: 'Recall authorized memory entries relevant to the current task', inputSchema: { required: ['query'], properties: { query: 'string' } }, risk: 'low', category: 'READ', permissions: [], execute: async (input, context) => (await this.searchMemory({ query: String(input.query), limit: 8, context: { subject: context.agentId, agentId: context.agentId } })).map((result) => ({ id: result.entry.id, content: result.entry.content, explanation: result.explanation })) },
+      { name: 'filesystem.list', description: 'List files under the configured Helix workspace', inputSchema: { properties: { path: 'string' } }, risk: 'low', category: 'READ', permissions: [], execute: async (input) => { const root = process.cwd(); const target = safeWorkspacePath(root, typeof input.path === 'string' ? input.path : '.'); return (await readdir(target, { withFileTypes: true })).map((entry) => ({ name: entry.name, type: entry.isDirectory() ? 'directory' : 'file' })); } },
+      { name: 'filesystem.read', description: 'Read a UTF-8 file under the configured Helix workspace', inputSchema: { required: ['path'], properties: { path: 'string' } }, risk: 'low', category: 'READ', permissions: [], execute: async (input) => { const target = safeWorkspacePath(process.cwd(), String(input.path)); return { path: relative(process.cwd(), target), content: (await readFile(target, 'utf8')).slice(0, 32_768) }; } },
+      { name: 'filesystem.write', description: 'Write a file only when policy explicitly authorizes it', inputSchema: { required: ['path', 'content'], properties: { path: 'string', content: 'string' } }, risk: 'high', category: 'WRITE', permissions: ['filesystem:write'], execute: async () => { throw new Error('filesystem.write requires an explicit host adapter and approval'); } },
+      { name: 'sandbox.exec', description: 'Execute an allowlisted command through SandboxManager', inputSchema: { required: ['command'], properties: { command: 'string' } }, risk: 'high', category: 'EXECUTE', permissions: ['sandbox:execute'], execute: async (input, context) => this.executeSandboxRequest({ enabled: true, backend: 'local', policy: { workspacePath: process.cwd(), allowedExecutables: [String(input.command)] }, command: { command: String(input.command), args: Array.isArray(input.args) ? input.args.map(String) : [], cwd: typeof input.cwd === 'string' ? input.cwd : '.', ...(typeof input.stdin === 'string' ? { stdin: input.stdin } : {}) } }, context.executionId, context.agentId, context.signal) },
+    ]);
   }
 
   async recordFederatedOutcome(input: FederatedOutcomeLearningInput): Promise<MemoryEntry> {

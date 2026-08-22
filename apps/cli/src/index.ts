@@ -18,10 +18,15 @@ function print(value: unknown): void {
   else if (typeof value === 'string') console.log(value);
   else console.log(JSON.stringify(value, null, 2));
 }
+function parseDuration(value: string): number { const match = value.match(/^(\d+(?:\.\d+)?)(ms|s|m)?$/i); if (!match) throw new Error(`Invalid duration: ${value}`); const amount = Number(match[1]); return Math.max(1, Math.floor(amount * (match[2]?.toLowerCase() === 'm' ? 60_000 : match[2]?.toLowerCase() === 's' ? 1_000 : 1))); }
+
 function option(name: string): string | undefined { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; }
 
 function help(): void {
-  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix sandbox doctor [--json]\n  helix sandbox run [--docker] [--network none] [--memory MB] [--timeout 10s] -- <command> [args...]\n  helix sandbox status [--json]\n  helix sandbox destroy <id> [--json]
+  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agent run <agent-id> "<task>" [--model <id>] [--provider <id>] [--max-iterations N] [--timeout 60s] [--no-memory] [--json]
+  helix agent executions [--json]
+  helix agent execution <execution-id> [--json]
+  helix agent cancel <execution-id> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix sandbox doctor [--json]\n  helix sandbox run [--docker] [--network none] [--memory MB] [--timeout 10s] -- <command> [args...]\n  helix sandbox status [--json]\n  helix sandbox destroy <id> [--json]
   helix memory search "<query>" [--json]
   helix memory list [--json]
   helix memory inspect <id> [--json]
@@ -105,6 +110,7 @@ async function main(): Promise<void> {
     console.log(`Tokens:    ${execution.usage.tokens}`);
     return;
   }
+  if (command === 'agent') { const action = args[1]; if (action === 'run') { if (!args[2]) throw new Error('Usage: helix agent run <agent-id> "<task>"'); const task = args.slice(3).filter((arg) => !arg.startsWith('--')).join(' ').trim(); if (!task) throw new Error('Usage: helix agent run <agent-id> "<task>"'); return print(await runtime.runAgent(args[2], { title: task, description: task }, { config: { ...(option('--max-iterations') ? { maxIterations: Number(option('--max-iterations')) } : {}), ...(option('--timeout') ? { maxExecutionTimeMs: parseDuration(option('--timeout')!) } : {}), ...(args.includes('--no-memory') ? { noMemory: true } : {}) }, metadata: { requestedProvider: option('--provider') ?? runtime.provider.name, requestedModel: option('--model') ?? 'deterministic-local' } })); } if (action === 'executions') return print({ executions: runtime.listAgentExecutions() }); if (action === 'execution' && args[2]) return print(runtime.getAgentExecution(args[2])); if (action === 'cancel' && args[2]) return print({ executionId: args[2], cancelled: await runtime.cancelAgentExecution(args[2]) }); throw new Error('Usage: helix agent <run|executions|execution|cancel> [id]'); }
   if (command === 'status') return print(await runtime.controlPlane.snapshot());
   if (command === 'metrics') return print(args.includes('--prometheus') ? runtime.controlPlane.metrics.prometheus() : runtime.controlPlane.metrics.snapshot());
   if (command === 'doctor') return print(await runtime.controlPlane.doctor.run());

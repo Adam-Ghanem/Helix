@@ -1,5 +1,6 @@
 import { timestamp } from '../../core/src/index.js';
 import type { HelixRuntime } from '../../runtime/src/index.js';
+import type { ExecutionRecord } from '../../core/src/index.js';
 import { EventBus } from './event-bus.js';
 import { MetricsRegistry } from './metrics.js';
 import { ExecutionTraceStore } from './trace.js';
@@ -47,7 +48,7 @@ export class ControlPlaneController {
     await this.syncEvents();
     const agents = this.runtime.agents.list();
     const tasks = this.runtime.listTasks();
-    const executions = this.runtime.listExecutions();
+    const executions = [...this.runtime.listExecutions(), ...await this.agentExecutionProjections()];
     const leases = this.runtime.scheduler.list();
     const nodes = this.runtime.federation.listNodes();
     const federation = this.runtime.federation.status();
@@ -64,6 +65,18 @@ export class ControlPlaneController {
     this.metrics.gauge('federation.nodes_healthy', nodes.filter((node) => node.status === 'healthy').length);
     this.metrics.gauge('memory.entries', memory.total);
     return { generatedAt: timestamp(), agents, tasks, workers, swarms: this.runtime.swarms.list() as unknown as Array<Record<string, unknown>>, nodes, executions, queue, memory, policies, federation, metrics: this.metrics.snapshot() };
+  }
+
+  private async agentExecutionProjections(): Promise<ExecutionRecord[]> {
+    const results = this.runtime.listAgentExecutions();
+    const projections: ExecutionRecord[] = [];
+    for (const result of results) {
+      const lifecycle = await this.runtime.events.read((event) => event.executionId === result.executionId && event.type === 'execution.started');
+      const startedAt = lifecycle[0]?.timestamp ?? new Date(Date.now() - result.durationMs).toISOString();
+      const status: ExecutionRecord['status'] = result.status === 'completed' ? 'completed' : result.status === 'cancelled' ? 'cancelled' : 'failed';
+      projections.push({ id: result.executionId, goal: result.taskId, status, createdAt: startedAt, updatedAt: new Date(new Date(startedAt).getTime() + result.durationMs).toISOString(), taskIds: [result.taskId], budget: { maxAgents: 1, maxTasks: 1, maxToolCalls: result.budget.remaining.maxToolCalls, maxTokens: result.budget.remaining.maxTokens, maxCostUsd: result.budget.remaining.maxCostUsd, maxRuntimeMs: result.budget.remaining.maxExecutionTimeMs, maxDelegationDepth: 0 }, usage: { agents: 1, tasks: 1, toolCalls: result.budget.toolCalls, tokens: result.usage?.tokens ?? 0, costUsd: result.usage?.costUsd ?? 0, runtimeMs: result.durationMs, delegationDepth: 0 }, ...(result.output ? { result: { output: result.output, agentId: result.agentId, toolCalls: result.toolCalls } } : {}), ...(result.errors[0] ? { error: result.errors[0] } : {}) });
+    }
+    return projections;
   }
 
   async trace(executionId: string) { await this.syncEvents(); return this.traces.get(executionId); }
