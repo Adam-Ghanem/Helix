@@ -35,7 +35,9 @@
     "distributed-runtime:demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-distributed-runtime-demo.js",
     "distributed-runtime:benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/distributed-runtime.js",
     "control-plane:demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-control-plane-demo.js",
-    "control-plane:benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/control-plane-m16.js"
+    "control-plane:benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/control-plane-m16.js",
+    "agent-runtime:benchmark": "pnpm exec tsc -p tsconfig.json && node dist/benchmarks/agent-runtime-m17.js",
+    "agent-runtime:demo": "pnpm exec tsc -p tsconfig.json && node dist/examples/helix-agent-runtime-demo.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
