@@ -111,14 +111,32 @@ flowchart TD
   Policy -. guards .-> Federation
   Policy -. guards .-> Workers
   Policy -. guards .-> SandboxManager
+  Runtime --> AgentRuntime[M17 AgentRuntime]
+  AgentRuntime --> AgentContext[Role guidance + bounded memory context]
+  AgentContext --> AgentDecision[Validated structured provider decision]
+  AgentDecision -->|final| AgentOutcome[Sanitized agent result]
+  AgentDecision -->|tool_call| AgentLoop[Bounded iteration / duplicate-call guard]
+  AgentLoop --> AgentToolExecutor[ToolExecutor]
+  AgentToolExecutor --> ToolSchema[Tool existence + schema validation]
+  ToolSchema --> ToolPermission[Agent permission + actor identity]
+  ToolPermission --> Policy
+  Policy --> ToolBudget[Budget / timeout / cancellation checks]
+  ToolBudget -->|read| AgentReadTools[Memory + workspace read tools]
+  ToolBudget -->|execute| SandboxManager
+  AgentReadTools --> AgentEvidence[Sanitized tool result + audit evidence]
+  SandboxManager --> AgentEvidence
+  AgentEvidence --> AgentLoop
+  AgentOutcome --> AgentLearning[Existing learning/evaluation path]
+  AgentRuntime --> AgentEvents[Agent lifecycle / budget / trace events]
+  AgentEvents --> Events
   Runtime --> Provider[Provider interface]
   Provider --> Models[Provider / model discovery]
   Runtime --> Knowledge[Local knowledge graph]
 
-  Runtime --> MCP[M11/M12/M13/M14 MCP Server]
-  MCP --> RegistryMCP[215 typed tool registry]
-  RegistryMCP --> Families[21 capability families]
-  MCP --> Resources[16 protected resources]
+  Runtime --> MCP[M11–M17 MCP Server]
+  MCP --> RegistryMCP[237 typed tool registry]
+  RegistryMCP --> Families[23 capability families]
+  MCP --> Resources[20 protected resources]
   MCP --> Prompts[12 policy-aware prompts]
   MCP --> Auth[Actor authorization + rate limits + audit]
   Auth --> Policy
@@ -183,3 +201,6 @@ flowchart TD
   TraceStore --> Dashboard
   MetricsRegistry --> Dashboard
   ControlEvents --> Dashboard
+  AgentRuntime --> ControlPlane
+  ControlPlane --> AgentRuntime
+  AgentEvents --> ControlEvents

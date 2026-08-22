@@ -313,7 +313,7 @@ helix session stop <id> --json
 helix session inspect <id> --json
 ```
 
-M16 contributes seven governed control MCP tools and protected control-plane resources. The total typed tool registry is now **232** in this branch. Read-only MCP actors can inspect control state, metrics, events, traces, sessions, and doctor results; destructive execution and remote federation actions remain behind their existing risk, RBAC, policy, rate-limit, audit, and trust boundaries.
+M16 contributed seven governed control MCP tools and protected control-plane resources; the M16 baseline contained **232** typed tools before M17 additions. Read-only MCP actors can inspect control state, metrics, events, traces, sessions, and doctor results; destructive execution and remote federation actions remain behind their existing risk, RBAC, policy, rate-limit, audit, and trust boundaries.
 
 Run M16 evidence locally with:
 
@@ -325,3 +325,32 @@ pnpm control-plane:benchmark
 The benchmark prints actual p50/p95/p99 measurements for snapshot generation, event dispatch, metric recording, trace creation, agent/task listing, provider routing, and dashboard/API serialization, plus explicit bounded 100-agent and 1,000-task status simulations. The demo uses 100 registered agents, multiple swarms, a real canonical worker-path execution, memory learning, an explicitly allowlisted sandbox command, an intentional bounded failure, metrics/events/traces, and local federation reassignment. The default provider is deterministic and no external provider call is made unless explicitly configured.
 
 M16 does not claim replicated control-plane state, distributed consensus, Byzantine fault tolerance, or kernel-level isolation. Local JSONL/SQLite persistence remains local infrastructure, and the dashboard requires a running API. See [`docs/milestone-16-control-plane.md`](docs/milestone-16-control-plane.md) and [`docs/control-plane.md`](docs/control-plane.md).
+
+## M17 real agent runtime and governed tool-calling loop
+
+M17 adds a bounded individual-agent runtime on top of the verified M1–M16 execution authorities. `AgentRuntime` builds role-aware context, performs bounded M10 memory recall, asks the existing provider boundary for a validated structured decision, and executes registered tools only through schema validation, agent permissions, existing policy/RBAC, budgets, rate limits where applicable, audit evidence, and `SandboxManager` for executable operations. It does not create a second scheduler, worker pool, provider abstraction, memory backend, policy engine, sandbox, swarm engine, federation path, or control plane.
+
+The default provider is deterministic and local. An OpenAI-compatible provider is available only when `HELIX_MODEL_API_URL`, `HELIX_MODEL_API_KEY`, and `HELIX_MODEL` are explicitly configured. Model output is always untrusted structured input; arbitrary shell commands, path traversal, privilege changes, network access, memory ACL changes, and federation trust changes are not inferred from text. Local sandbox controls are not equivalent to Docker kernel isolation.
+
+Run an individual agent through the API or CLI:
+
+```bash
+helix agent run <agent-id> "Inspect the repository and summarize the runtime" --provider deterministic-local --max-iterations 8 --timeout 60s --json
+helix agent executions <agent-id> --json
+helix agent execution <execution-id> --json
+helix agent cancel <execution-id> --json
+```
+
+The API exposes `POST /api/v1/agents/:id/run`, agent execution listing, structured execution inspection, trace inspection, and cancellation. MCP adds five governed agent actions: `agent.run`, `agent.cancel`, `agent.execution`, `agent.executions`, and `agent.tool-history`. The registry now contains **237 typed tools** and **20 protected resources**. Agent execution is `EXECUTE` risk; the default read-only MCP actor can inspect permitted state but cannot invoke it. The `helix-m17` MCP server identifies itself as version `0.17.0`.
+
+The M16 control plane projects live agent execution results into operator status and traces. The dashboard shows role/specialization/capabilities, health, execution history, provider/model, tool calls, budgets, policy denials, memory counts, latency, and sanitized trace stages. It remains read-only and contains no fabricated production records.
+
+Run M17 evidence locally with:
+
+```bash
+pnpm agent-runtime:benchmark
+pnpm agent-runtime:demo
+node --test dist/tests/agent-runtime-m17.test.js
+```
+
+The focused M17 suite contains 29 deterministic scenarios. The benchmark reports actual p50/p95/p99 latency and bounded 100-agent/1,000-task throughput measurements. The demo uses the existing runtime and sandbox seams to show inspection, controlled failure/recovery, policy denial, testing/review, learning, events, and traces. These are local deterministic observations rather than production capacity promises or evidence of real LLM reasoning. See [`docs/milestone-17-agent-runtime.md`](docs/milestone-17-agent-runtime.md) and [`docs/agent-runtime.md`](docs/agent-runtime.md).
