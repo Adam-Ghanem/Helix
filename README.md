@@ -2,15 +2,94 @@
 
 > **Coordinate Intelligence.**
 
-Helix is an autonomous multi-agent operating system and orchestration runtime. The core principle is that the LLM is a replaceable component: Helix owns execution state, scheduling, permissions, recovery, coordination, observability, and durable evidence.
+<p align="center">
+  <img src="https://img.shields.io/github/actions/workflow/status/Adam-Ghanem/Helix/ci.yml?label=CI" alt="CI">
+  <img src="https://img.shields.io/github/license/Adam-Ghanem/Helix" alt="License">
+  <img src="https://img.shields.io/github/stars/Adam-Ghanem/Helix" alt="GitHub stars">
+  <img src="https://img.shields.io/github/commit-activity/m/Adam-Ghanem/Helix" alt="Commit activity">
+</p>
 
-## What is implemented in v0.1
+Helix is an **autonomous multi-agent orchestration runtime** built to coordinate intelligent agents, tools, workflows, memory, and execution state through one controlled system.
 
-This repository contains a runnable vertical slice rather than a non-functional mock. It includes an append-only durable event store with replay and snapshots, idempotent event handling, a validated task-DAG engine, pluggable routing strategies, policy evaluation with approval gates, resource budgets, a lease-based local scheduler, structured cognition metadata, agent health and reputation tracking, a provider-neutral runtime, lifecycle controls for pause/resume/cancel/retry/checkpoint/recovery, a bounded and optionally authenticated HTTP API, a JSON-capable CLI, a TypeScript SDK, a dashboard shell, and unit/integration tests.
+The core idea is simple: **the model is replaceable; the orchestration layer is not.** Helix owns scheduling, routing, permissions, recovery, coordination, observability, and durable execution evidence.
 
-The default runtime uses a local JSONL event log so it can run without Docker or an external database. The persistence interfaces are intentionally provider-neutral; PostgreSQL, Redis, vector databases, graph databases, MCP transports, and federated nodes are declared as extension points and are not represented as complete implementations in this release.
+## ⚡ Highlights
 
-## Quick start
+- 🤖 Multi-agent execution and coordination
+- 🧠 Observe → interpret → plan → act → evaluate runtime
+- ⚙️ Capability-aware routing and adaptive scheduling
+- 🧩 Task DAGs and declarative workflows
+- 🐝 Swarm topologies and consensus strategies
+- 🔐 Default-deny policies and human approval gates
+- 💾 Durable event log, replay, snapshots and recovery
+- 🧠 Structured memory and provenance-aware knowledge
+- 🔌 Provider-neutral model runtime and MCP boundaries
+- 📊 Telemetry, evaluation and execution evidence
+- 🛡️ Sandboxing, command controls and secret boundaries
+- 📦 TypeScript SDK, CLI and HTTP API
+
+## 🏗️ Architecture
+
+```text
+                         ┌──────────────────┐
+                         │   CLI / SDK / API │
+                         └────────┬─────────┘
+                                  │
+                         ┌────────▼─────────┐
+                         │ Execution Runtime│
+                         └────────┬─────────┘
+                                  │
+              ┌───────────────────┼───────────────────┐
+              │                   │                   │
+       ┌──────▼──────┐     ┌──────▼──────┐     ┌──────▼──────┐
+       │   Planner   │     │    Router   │     │  Scheduler  │
+       │  Task DAGs  │     │ Capabilities│     │ Leases/Load │
+       └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+              │                   │                   │
+              └───────────────────┼───────────────────┘
+                                  │
+                    ┌─────────────▼─────────────┐
+                    │      Agent / Tool Layer   │
+                    │ Agents • MCP • Providers  │
+                    └─────────────┬─────────────┘
+                                  │
+              ┌───────────────────┼───────────────────┐
+              │                   │                   │
+       ┌──────▼──────┐     ┌──────▼──────┐     ┌──────▼──────┐
+       │   Memory    │     │  Knowledge  │     │ Observability│
+       │  & Evidence │     │ Provenance  │     │ & Evaluation │
+       └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+              │                   │                   │
+              └───────────────────┼───────────────────┘
+                                  │
+                         ┌────────▼─────────┐
+                         │ Durable State    │
+                         │ Events / Replay  │
+                         └──────────────────┘
+```
+
+Helix separates **planning, routing, scheduling, execution, policy, memory, coordination, and persistence** so intelligent behavior remains observable, controllable, and recoverable.
+
+## 🧠 How Helix Works
+
+A task enters the runtime and is transformed into a validated execution plan. Helix selects agents and tools based on capabilities and runtime conditions, applies policy before sensitive actions, executes through controlled boundaries, records structured evidence, and evaluates the resulting trajectory.
+
+This makes the system **model-agnostic**: different model providers can power the reasoning layer without taking ownership of the orchestration state.
+
+## 🔐 Security by Design
+
+Helix treats agent execution as a controlled system rather than unrestricted model output.
+
+- Default-deny policy decisions
+- Explicit approval gates
+- Auditable tool requests
+- Bounded command and environment controls
+- Execution timeouts and resource budgets
+- Replay protection and durable lifecycle events
+- Structured decision metadata instead of private chain-of-thought
+- Provider-neutral model boundary
+
+## 🚀 Quick Start
 
 ```bash
 pnpm install
@@ -18,74 +97,50 @@ pnpm verify
 pnpm dev:api
 ```
 
-In another shell:
+In another terminal:
 
 ```bash
 pnpm dev:cli run "Review this repository architecture"
-# or
+```
+
+For JSON output:
+
+```bash
 pnpm dev:cli run "Review this repository architecture" --json
 ```
 
-The API listens on `http://127.0.0.1:8787` by default. Set `HELIX_DATA_DIR` to choose the durable data directory and `HELIX_PORT` or `HELIX_HOST` to change the listener. For non-local access, set `HELIX_API_KEY`; all routes except `/api/v1/health` then require `Authorization: Bearer <key>`. Request bodies are bounded and a per-client request rate limit is enforced.
+Helix can run with its deterministic local provider or connect to an OpenAI-compatible model endpoint through configuration.
 
-To use a real OpenAI-compatible provider, set `HELIX_MODEL_API_URL`, `HELIX_MODEL_API_KEY`, and `HELIX_MODEL`. When all three are present, both the API and CLI use the bounded HTTP adapter with request timeouts and usage accounting. If they are absent, Helix intentionally uses the deterministic local provider.
+## 🧱 Built With
 
-## Repository map
+- **TypeScript**
+- Node.js
+- Durable event-driven runtime
+- Task DAG orchestration
+- Provider-neutral model adapters
+- MCP security boundaries
+- HTTP API + CLI + SDK
+- Automated tests and verification
 
-| Area | Purpose | Status |
-|---|---|---|
-| `packages/core` | Versioned domain objects and IDs | Implemented |
-| `packages/durable` | Event log, replay, snapshots, idempotency | Implemented |
-| `packages/planner` | Validated task DAGs and mutation | Implemented |
-| `packages/router` | Capability, weighted, quality, cost, latency, hybrid routing | Implemented |
-| `packages/policy` | Default-deny policy decisions and approvals | Implemented |
-| `packages/scheduler` | Durable local leases and recovery hooks | Implemented |
-| `packages/runtime` | Observe–interpret–plan–act–evaluate lifecycle, lifecycle controls, memory, telemetry | Implemented |
-| `packages/agents` | Built-in catalog, health, reputation | Implemented |
-| `packages/memory` | Access-controlled structured memory and deterministic search | Implemented |
-| `packages/tools` / `packages/mcp` | Tool schema registry and MCP security boundary | Implemented boundary |
-| `packages/workflows` | Versioned declarative workflow DAGs | Implemented |
-| `packages/swarm` / `packages/consensus` | Swarm topology planning and consensus strategies | Implemented |
-| `packages/knowledge` | Provenance-aware graph entities and relations | Implemented |
-| `packages/observability` | Correlated spans, metrics, and structured logs | Implemented |
-| `packages/evaluation` | Rule, schema, test, human, and non-authoritative LLM-judge evaluation contracts | Implemented |
-| `packages/learning` | Trajectory evidence and reusable strategy/tool patterns | Implemented |
-| `packages/security` / `packages/sandbox` | Traversal-safe paths, command allowlists, environment filtering, timeout controls | Implemented controls; OS isolation boundary remains |
-| `packages/plugins` / `packages/providers` | Plugin trust and provider/model capability discovery | Implemented foundations |
-| `packages/federation` | Signed messages, replay protection, node registry, heartbeat | Implemented foundation |
-| `packages/sdk` | TypeScript client for execution, lifecycle, memory, telemetry, approvals | Implemented |
-| `apps/api` | Versioned HTTP API | Implemented |
-| `apps/cli` | Professional CLI with JSON output | Implemented |
-| `apps/dashboard` | Read-only dashboard shell | Boundary documented |
+## 🏅 Engineering Quality
 
-## Security posture
+Helix uses automated **CI, strict type checking, builds, tests, dependency auditing, and security-focused controls** as part of its engineering workflow.
 
-The policy engine defaults to deny. Tool calls are represented as auditable requests and cannot execute until an explicit policy decision allows them or a human approval is recorded. Helix stores structured decision metadata, not private chain-of-thought. Secrets are not accepted as ordinary execution state.
+## 📄 License
 
-This repository is not a production security certification. Before deployment, run the security test matrix, supply a real secret provider, place the API behind TLS and authentication, and replace the local event log with a reviewed durable store appropriate to the deployment scale.
+Helix is released under the **Apache-2.0 License**. See [`LICENSE`](LICENSE) for the full license text.
 
-## Validation
+## 🔭 Vision
 
-```bash
-pnpm typecheck
-pnpm build
-pnpm test
-```
+Helix aims to provide the **orchestration layer for reliable autonomous software** — where agents can reason and collaborate, while the system around them owns execution, safety, memory, coordination, and recovery.
 
-Lifecycle controls are available through the CLI and API:
+## 🤝 Contributing
 
-```bash
-helix execution <execution-id> pause
-helix execution <execution-id> resume
-helix execution <execution-id> cancel
-helix execution <execution-id> retry
-helix execution <execution-id> checkpoint
-```
+Contributions, ideas, experiments, and improvements are welcome.
 
-The runtime persists lifecycle events and can rehydrate completed executions from the event log. `helix recover` is planned as a daemon command; the runtime recovery API is currently exposed through the SDK and application layer.
+---
 
-Measured benchmark output is written by `node benchmarks/runtime.mjs` or `pnpm benchmark` and is never hard-coded into documentation. The golden flow is available through `pnpm golden-demo`.
-
-## License
-
-Apache-2.0. Independent implementation. Helix does not copy source code, branding, or proprietary architecture from other projects.
+<p align="center">
+  <strong>Helix</strong><br>
+  <em>Coordinate Intelligence.</em>
+</p>
