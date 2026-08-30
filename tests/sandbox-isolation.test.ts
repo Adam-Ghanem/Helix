@@ -35,8 +35,12 @@ test('bubblewrap sandbox builds a minimal read-only no-network plan with bounded
   assert.ok(bwrapArgs.includes('--ro-bind'));
   assert.ok(bwrapArgs.includes('/usr'));
   assert.ok(bwrapArgs.includes('/lib'));
-  assert.equal(bwrapArgs.includes('/home'), false);
-  assert.equal(bwrapArgs.includes('/root'), false);
+  assert.equal(hasMount(bwrapArgs, '--ro-bind', '/home'), false);
+  assert.equal(hasMount(bwrapArgs, '--bind', '/home'), false);
+  assert.equal(hasMount(bwrapArgs, '--ro-bind', '/root'), false);
+  assert.equal(hasMount(bwrapArgs, '--bind', '/root'), false);
+  assert.ok(bwrapArgs.includes('--dir'));
+  assert.ok(bwrapArgs.includes('/home'));
   assert.ok(bwrapArgs.includes('--bind'));
   assert.ok(bwrapArgs.includes(workspace));
   assert.ok(bwrapArgs.includes('/workspace'));
@@ -90,3 +94,10 @@ test('unsafe process fallback is bounded and opt-in, not reported as isolation',
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+function hasMount(args: string[], flag: '--bind' | '--ro-bind', source: string): boolean {
+  for (let index = 0; index < args.length - 2; index += 1) {
+    if (args[index] === flag && args[index + 1] === source) return true;
+  }
+  return false;
+}
