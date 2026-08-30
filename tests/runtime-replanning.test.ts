@@ -100,3 +100,107 @@ test('runtime replans one failed task, preserves completed work, and continues d
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('runtime rebuild restores a durable plan revision without duplicating replacement work', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-replan-restart-'));
+  let failedOriginal = false;
+  try {
+    const first = new HelixRuntime({
+      dataDirectory: directory,
+      provider: {
+        name: 'restart-replan-provider',
+        async execute(input) {
+          if (input.task.title === 'Execute bounded work' && !failedOriginal) {
+            failedOriginal = true;
+            throw new Error('restart durable failure');
+          }
+          return { output: { completed: input.task.title }, tokens: 1, costUsd: 0, quality: 0.9 };
+        },
+      },
+    });
+    const execution = await first.execute({ goal: 'Persist a repaired plan' });
+    assert.equal(execution.status, 'completed');
+
+    const second = new HelixRuntime({ dataDirectory: directory });
+    const restored = await second.view(execution.id);
+    assert.equal(restored.planRevision, 1);
+    assert.equal(restored.tasks.length, 5);
+    assert.equal(restored.events.filter((event) => event.type === 'plan.replanned').length, 1);
+    assert.equal(restored.tasks.filter((entry) => entry.title === 'Repair Execute bounded work').length, 1);
+    assert.equal(restored.tasks.find((entry) => entry.title === 'Execute bounded work')?.status, 'skipped');
+    assert.match(restored.tasks.find((entry) => entry.title === 'Execute bounded work')?.error ?? '', /restart durable failure/);
+    assert.equal(restored.tasks.find((entry) => entry.title === 'Repair Execute bounded work')?.status, 'completed');
+    assert.equal(restored.tasks.find((entry) => entry.title === 'Evaluate result')?.status, 'completed');
+    assert.deepEqual(restored.tasks.find((entry) => entry.title === 'Interpret goal')?.result, { completed: 'Interpret goal' });
+    assert.deepEqual(restored.tasks.find((entry) => entry.title === 'Assess architecture')?.result, { completed: 'Assess architecture' });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('maxReplans allows one repair then rejects the next failure exactly once', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-replan-limit-'));
+  try {
+    const runtime = new HelixRuntime({
+      dataDirectory: directory,
+      maxReplans: 1,
+      provider: {
+        name: 'replan-limit-provider',
+        async execute(input) {
+          if (input.task.title === 'Execute bounded work' || input.task.title.startsWith('Repair ')) {
+            throw new Error(`persistent failure: ${input.task.title}`);
+          }
+          return { output: { completed: input.task.title }, tokens: 1, costUsd: 0, quality: 0.9 };
+        },
+      },
+    });
+
+    const execution = await runtime.execute({ goal: 'Bound repeated plan repairs' });
+    const view = await runtime.view(execution.id);
+    assert.equal(execution.status, 'failed');
+    assert.equal(view.planRevision, 1);
+    assert.equal(view.tasks.length, 5);
+    assert.equal(view.events.filter((event) => event.type === 'plan.replanned').length, 1);
+    const rejected = view.events.filter((event) => event.type === 'plan.replan_rejected');
+    assert.equal(rejected.length, 1);
+    assert.match(String((rejected[0]?.payload as { reason?: string }).reason), /maxReplans/i);
+    assert.equal(view.tasks.find((entry) => entry.title === 'Execute bounded work')?.status, 'skipped');
+    assert.equal(view.tasks.find((entry) => entry.title === 'Repair Execute bounded work')?.status, 'failed');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('maxTasks rejects repair without mutating the original four-task graph', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-replan-task-budget-'));
+  let failedOriginal = false;
+  try {
+    const runtime = new HelixRuntime({
+      dataDirectory: directory,
+      provider: {
+        name: 'task-budget-provider',
+        async execute(input) {
+          if (input.task.title === 'Execute bounded work' && !failedOriginal) {
+            failedOriginal = true;
+            throw new Error('task budget failure');
+          }
+          return { output: { completed: input.task.title }, tokens: 1, costUsd: 0, quality: 0.9 };
+        },
+      },
+    });
+
+    const execution = await runtime.execute({ goal: 'Respect task capacity', budget: { maxTasks: 4 } });
+    const view = await runtime.view(execution.id);
+    assert.equal(execution.status, 'failed');
+    assert.equal(view.planRevision, 0);
+    assert.equal(view.tasks.length, 4);
+    assert.equal(execution.usage.tasks, 4);
+    assert.equal(view.events.filter((event) => event.type === 'plan.replanned').length, 0);
+    const rejected = view.events.filter((event) => event.type === 'plan.replan_rejected');
+    assert.equal(rejected.length, 1);
+    assert.equal(view.tasks.find((entry) => entry.title === 'Execute bounded work')?.status, 'failed');
+    assert.equal(view.tasks.some((entry) => entry.title.startsWith('Repair ')), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
