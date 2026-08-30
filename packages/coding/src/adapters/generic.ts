@@ -1,10 +1,10 @@
 import { access, constants } from 'node:fs/promises';
-import { BoundedProcessRunner } from '../process.js';
+import type { ProcessRunner } from '../process.js';
 import { CodingAgentAdapter, CodingAgentRequest, CodingAgentResult } from './base.js';
 
 export interface GenericCliAdapterOptions {
   name: string;
-  runner: BoundedProcessRunner;
+  runner: ProcessRunner;
   executable: string;
   staticArgs?: string[];
   promptTransport: 'argv' | 'stdin';

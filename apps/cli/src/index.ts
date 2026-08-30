@@ -14,6 +14,8 @@ import {
   HttpQualityModel,
   ModelJudge,
   ModelReviewer,
+  ProcessRunner,
+  SandboxProcessRunner,
   VerificationCommand,
   VerificationRunner,
   createCommandSafetyHook,
@@ -25,6 +27,7 @@ import { daemonPaths, enqueueExecution, readDaemonStatus, requestDaemonStop } fr
 import { HookEngine, HookEventName } from '../../../packages/hooks/src/index.js';
 import { DurableLearningEngine } from '../../../packages/learning/src/index.js';
 import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
+import { SandboxManager } from '../../../packages/sandbox/src/index.js';
 import { DurableTaskQueue } from '../../../packages/workers/src/index.js';
 
 const args = process.argv.slice(2);
@@ -42,7 +45,7 @@ function print(value: unknown): void {
 }
 
 function help(): void {
-  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--background] [--json]\n  helix code run <goal> [--adapter <name>] [--json]\n  helix code resume <session-id> [--adapter <name>] [--json]\n  helix code session <session-id> [--json]\n  helix code sessions [--json]\n  helix hooks list [--json]\n  helix hooks run <event> --session <id> [--payload <json>] [--json]\n  helix daemon <start|status|stop> [--json]\n  helix jobs [--json]\n  helix job <id> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
+  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--background] [--json]\n  helix code run <goal> [--adapter <name>] [--json]\n  helix code resume <session-id> [--adapter <name>] [--json]\n  helix code session <session-id> [--json]\n  helix code sessions [--json]\n  helix hooks list [--json]\n  helix hooks run <event> --session <id> [--payload <json>] [--json]\n  helix sandbox status [--json]\n  helix daemon <start|status|stop> [--json]\n  helix jobs [--json]\n  helix job <id> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
 }
 
 async function main(): Promise<void> {
@@ -51,6 +54,7 @@ async function main(): Promise<void> {
 
   if (command === 'daemon') return handleDaemonCommand();
   if (command === 'jobs' || command === 'job') return handleJobCommand(command);
+  if (command === 'sandbox') return handleSandboxCommand();
 
   await runtime.init();
   if (command === 'code') return handleCodeCommand();
@@ -123,7 +127,7 @@ async function handleCodeCommand(): Promise<void> {
   }
   if (action !== 'run' && action !== 'resume') throw new Error('Usage: helix code <run|resume|session|sessions> ...');
   const adapterName = optionValue('--adapter') ?? process.env.HELIX_CODE_ADAPTER ?? 'deterministic';
-  const adapter = createCodingAdapter(adapterName);
+  const adapter = await createCodingAdapter(adapterName);
   const hooks = createCodingHooks(store);
   const learning = new DurableLearningEngine({ stateFile: join(dataDirectory, 'learning.json') });
   const verificationCommands = parseVerificationCommands(process.env.HELIX_CODE_VERIFY_JSON);
@@ -183,6 +187,18 @@ async function handleHooksCommand(): Promise<void> {
   return print(await hooks.run({ event, sessionId, cwd: session.cwd, timestamp: new Date().toISOString(), payload, metadata: { source: 'cli' } }));
 }
 
+async function handleSandboxCommand(): Promise<void> {
+  const action = args[1] ?? 'status';
+  if (action !== 'status') throw new Error('Usage: helix sandbox status');
+  if (process.platform !== 'linux') return print({ platform: process.platform, strictAvailable: false, backend: 'unavailable', reason: 'Bubblewrap isolation is supported on Linux.' });
+  try {
+    const sandbox = await new SandboxManager({ workspace: process.cwd(), allowedCommands: [process.execPath] }).create();
+    return print({ platform: process.platform, strictAvailable: sandbox.isolated, backend: sandbox.backend });
+  } catch (error) {
+    return print({ platform: process.platform, strictAvailable: false, backend: 'unavailable', reason: error instanceof Error ? error.message : String(error) });
+  }
+}
+
 function createCodingHooks(_store: CodingSessionStore): HookEngine {
   const hooks = new HookEngine();
   const workspaceRoot = process.env.HELIX_CODE_WORKSPACE_ROOT ?? process.cwd();
@@ -193,14 +209,14 @@ function createCodingHooks(_store: CodingSessionStore): HookEngine {
   return hooks;
 }
 
-function createCodingAdapter(name: string): CodingAgentAdapter {
+async function createCodingAdapter(name: string): Promise<CodingAgentAdapter> {
   if (name === 'deterministic') return new DeterministicCodingAdapter();
   const workspaceRoot = process.env.HELIX_CODE_WORKSPACE_ROOT ?? process.cwd();
   if (name === 'claude' || name === 'claude-code') {
     const executable = process.env.HELIX_CLAUDE_EXECUTABLE;
     if (!executable || !isAbsolute(executable)) throw new Error('HELIX_CLAUDE_EXECUTABLE must be an absolute executable path');
     const envKeys = environmentKeys();
-    return new ClaudeCodeAdapter({ executable, runner: processRunner(executable, workspaceRoot, envKeys), environment: environmentValues(envKeys) });
+    return new ClaudeCodeAdapter({ executable, runner: await codingProcessRunner(executable, workspaceRoot, envKeys), environment: environmentValues(envKeys) });
   }
   if (name === 'generic') {
     const executable = process.env.HELIX_CODE_EXECUTABLE;
@@ -209,7 +225,7 @@ function createCodingAdapter(name: string): CodingAgentAdapter {
     const staticArgs = parseStringArray(process.env.HELIX_CODE_ARGS, 'HELIX_CODE_ARGS');
     const promptTransport = process.env.HELIX_CODE_PROMPT_TRANSPORT === 'argv' ? 'argv' : 'stdin';
     return new GenericCliAdapter({
-      name: process.env.HELIX_CODE_ADAPTER_NAME ?? 'generic', runner: processRunner(executable, workspaceRoot, envKeys), executable, staticArgs, promptTransport, environment: environmentValues(envKeys),
+      name: process.env.HELIX_CODE_ADAPTER_NAME ?? 'generic', runner: await codingProcessRunner(executable, workspaceRoot, envKeys), executable, staticArgs, promptTransport, environment: environmentValues(envKeys),
       parse: (stdout) => {
         try {
           const parsed = JSON.parse(stdout) as Record<string, unknown>;
@@ -266,6 +282,25 @@ function parseVerificationCommands(raw: string | undefined): VerificationCommand
   });
 }
 
+async function codingProcessRunner(executable: string, workspaceRoot: string, envKeys: string[]): Promise<ProcessRunner> {
+  const mode = process.env.HELIX_CODE_SANDBOX ?? 'strict';
+  if (mode === 'host') return processRunner(executable, workspaceRoot, envKeys);
+  if (mode !== 'strict') throw new Error('HELIX_CODE_SANDBOX must be "strict" or "host"; host execution is an explicit opt-in.');
+  const runtimePaths = process.env.HELIX_CODE_SANDBOX_RUNTIME_PATHS
+    ? parseStringArray(process.env.HELIX_CODE_SANDBOX_RUNTIME_PATHS, 'HELIX_CODE_SANDBOX_RUNTIME_PATHS')
+    : undefined;
+  const sandbox = await new SandboxManager({
+    workspace: workspaceRoot,
+    allowedCommands: [executable],
+    allowedEnvironmentKeys: envKeys,
+    timeoutMs: 120_000,
+    maxOutputBytes: 1_048_576,
+    ...(runtimePaths ? { runtimeReadOnlyPaths: runtimePaths } : {}),
+    network: parseBoolean(process.env.HELIX_CODE_SANDBOX_NETWORK, 'HELIX_CODE_SANDBOX_NETWORK'),
+  }).create();
+  return new SandboxProcessRunner({ sandbox });
+}
+
 function processRunner(executable: string, workspaceRoot: string, envKeys: string[]): BoundedProcessRunner {
   return new BoundedProcessRunner({ allowedExecutables: [executable], workspaceRoots: [workspaceRoot], environmentKeys: envKeys, maxStdoutBytes: 1_048_576, maxStderrBytes: 262_144, killGraceMs: 250 });
 }
@@ -283,6 +318,11 @@ function parseStringArray(raw: string | undefined, name: string): string[] {
     if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) throw new Error('must be a JSON string array');
     return value;
   } catch (error) { throw new Error(`${name} must be a JSON string array: ${error instanceof Error ? error.message : String(error)}`); }
+}
+function parseBoolean(raw: string | undefined, name: string): boolean {
+  if (raw === undefined || raw === '' || raw === '0' || raw === 'false') return false;
+  if (raw === '1' || raw === 'true') return true;
+  throw new Error(`${name} must be one of: 1, 0, true, false`);
 }
 function optionValue(name: string): string | undefined {
   const index = args.indexOf(name);

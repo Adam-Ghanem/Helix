@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './store.js';
 export * from './process.js';
+export * from './sandbox-runner.js';
 export * from './adapters/base.js';
 export * from './adapters/generic.js';
 export * from './adapters/claude.js';

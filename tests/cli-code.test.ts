@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -15,7 +15,7 @@ function cli(args: string[], env: Record<string, string>): Promise<{ code: numbe
   });
 }
 
-test('cli exposes coding sessions and hook commands with valid json', async () => {
+test('cli exposes coding sessions, hooks, and sandbox status with valid json', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'helix-cli-code-'));
   try {
     const env = { HELIX_DATA_DIR: directory, HELIX_CODE_ADAPTER: 'deterministic' };
@@ -23,6 +23,14 @@ test('cli exposes coding sessions and hook commands with valid json', async () =
     assert.equal(help.code, 0);
     assert.match(help.stdout, /helix code run/i);
     assert.match(help.stdout, /helix hooks list/i);
+    assert.match(help.stdout, /helix sandbox status/i);
+
+    const sandbox = await cli(['sandbox', 'status', '--json'], env);
+    assert.equal(sandbox.code, 0, sandbox.stderr);
+    const sandboxStatus = JSON.parse(sandbox.stdout) as { platform: string; strictAvailable: boolean; backend: string };
+    assert.equal(sandboxStatus.platform, process.platform);
+    assert.equal(typeof sandboxStatus.strictAvailable, 'boolean');
+    assert.ok(['bubblewrap', 'unavailable'].includes(sandboxStatus.backend));
 
     const run = await cli(['code', 'run', 'Implement parser', '--json'], env);
     assert.equal(run.code, 0, run.stderr);
@@ -45,5 +53,29 @@ test('cli exposes coding sessions and hook commands with valid json', async () =
     const badPayload = await cli(['hooks', 'run', 'pre-task', '--session', session.id, '--payload', '{bad}', '--json'], env);
     assert.notEqual(badPayload.code, 0);
     assert.match(badPayload.stderr, /payload/i);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('external coding adapters require an explicit valid sandbox mode and host mode remains opt-in', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-cli-code-sandbox-'));
+  try {
+    const script = join(directory, 'agent.mjs');
+    await writeFile(script, `let input='';for await (const chunk of process.stdin) input+=chunk;process.stdout.write(JSON.stringify({changedFiles:[],commands:[],prompt:input}))`, 'utf8');
+    const common = {
+      HELIX_DATA_DIR: join(directory, '.helix'),
+      HELIX_CODE_WORKSPACE_ROOT: directory,
+      HELIX_CODE_CWD: directory,
+      HELIX_CODE_EXECUTABLE: process.execPath,
+      HELIX_CODE_ARGS: JSON.stringify([script]),
+      HELIX_CODE_PROMPT_TRANSPORT: 'stdin',
+    };
+
+    const invalid = await cli(['code', 'run', 'test sandbox mode', '--adapter', 'generic', '--json'], { ...common, HELIX_CODE_SANDBOX: 'invalid' });
+    assert.notEqual(invalid.code, 0);
+    assert.match(invalid.stderr, /HELIX_CODE_SANDBOX/i);
+
+    const host = await cli(['code', 'run', 'host opt in', '--adapter', 'generic', '--json'], { ...common, HELIX_CODE_SANDBOX: 'host' });
+    assert.equal(host.code, 0, host.stderr);
+    assert.equal((JSON.parse(host.stdout) as { status: string }).status, 'completed');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -54,6 +54,16 @@ export interface SandboxExecutionPlan {
   maxOutputBytes: number;
 }
 
+export interface SandboxExecutionRequest {
+  command: string;
+  args: string[];
+  cwd?: string;
+  environment?: Record<string, string>;
+  stdin?: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 export interface SandboxExecutionResult {
   backend: SandboxBackend;
   isolated: boolean;
@@ -63,6 +73,7 @@ export interface SandboxExecutionResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  cancelled?: boolean;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
 }
@@ -71,6 +82,7 @@ export interface ExecutableSandbox {
   readonly backend: SandboxBackend;
   readonly isolated: boolean;
   execute(command: string, args: string[], cwd?: string, environment?: Record<string, string>): Promise<SandboxExecutionResult>;
+  executeRequest(request: SandboxExecutionRequest): Promise<SandboxExecutionResult>;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -98,7 +110,11 @@ abstract class BaseSandbox implements ExecutableSandbox {
     this.maxOutputBytes = positiveInteger(options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES, 'maxOutputBytes');
   }
 
-  abstract execute(command: string, args: string[], cwd?: string, environment?: Record<string, string>): Promise<SandboxExecutionResult>;
+  execute(command: string, args: string[], cwd = '.', environment: Record<string, string> = {}): Promise<SandboxExecutionResult> {
+    return this.executeRequest({ command, args, cwd, environment });
+  }
+
+  abstract executeRequest(request: SandboxExecutionRequest): Promise<SandboxExecutionResult>;
 
   protected validateCommand(command: string): string {
     return assertAbsoluteExecutable(command, this.allowedCommands);
@@ -111,25 +127,34 @@ abstract class BaseSandbox implements ExecutableSandbox {
   protected filterEnvironment(environment: Record<string, string>): Record<string, string> {
     return Object.fromEntries(Object.entries(environment).filter(([key]) => this.allowedEnvironmentKeys.has(key)));
   }
+
+  protected effectiveTimeout(timeoutMs: number | undefined): number {
+    if (timeoutMs === undefined) return this.timeoutMs;
+    const requested = positiveInteger(timeoutMs, 'timeoutMs');
+    return Math.min(this.timeoutMs, requested);
+  }
 }
 
 export class UnsafeProcessSandbox extends BaseSandbox {
   readonly backend = 'process' as const;
   readonly isolated = false;
 
-  async execute(command: string, args: string[], cwd = '.', environment: Record<string, string> = {}): Promise<SandboxExecutionResult> {
-    const executable = this.validateCommand(command);
-    const hostCwd = this.resolveCwd(cwd);
-    const filtered = this.filterEnvironment(environment);
+  async executeRequest(request: SandboxExecutionRequest): Promise<SandboxExecutionResult> {
+    if (request.signal?.aborted) throw new Error('Sandbox execution cancelled before start');
+    const executable = this.validateCommand(request.command);
+    const hostCwd = this.resolveCwd(request.cwd ?? '.');
+    const filtered = this.filterEnvironment(request.environment ?? {});
     const result = await runBounded({
       executable,
-      args: [...args],
+      args: [...request.args],
       cwd: hostCwd,
       environment: { PATH: process.env.PATH ?? SAFE_PATH, ...filtered },
-      timeoutMs: this.timeoutMs,
+      timeoutMs: this.effectiveTimeout(request.timeoutMs),
       maxOutputBytes: this.maxOutputBytes,
+      ...(request.stdin !== undefined ? { stdin: request.stdin } : {}),
+      ...(request.signal ? { signal: request.signal } : {}),
     });
-    return { backend: this.backend, isolated: this.isolated, command: executable, args: [...args], ...result };
+    return { backend: this.backend, isolated: this.isolated, command: executable, args: [...request.args], ...result };
   }
 }
 
@@ -170,7 +195,7 @@ export class BubblewrapSandbox extends BaseSandbox {
     this.maxProcesses = positiveInteger(options.maxProcesses ?? 64, 'maxProcesses');
   }
 
-  plan(command: string, args: string[], cwd = '.', environment: Record<string, string> = {}): SandboxExecutionPlan {
+  plan(command: string, args: string[], cwd = '.', environment: Record<string, string> = {}, timeoutMs?: number): SandboxExecutionPlan {
     const executable = this.validateCommand(command);
     const hostCwd = this.resolveCwd(cwd);
     if (!this.runtimeReadOnlyPaths.some((root) => isInside(executable, root))) {
@@ -217,7 +242,7 @@ export class BubblewrapSandbox extends BaseSandbox {
         ],
         cwd: this.workspace,
         environment: { PATH: process.env.PATH ?? SAFE_PATH },
-        timeoutMs: this.timeoutMs,
+        timeoutMs: this.effectiveTimeout(timeoutMs),
         maxOutputBytes: this.maxOutputBytes,
       };
     }
@@ -229,15 +254,20 @@ export class BubblewrapSandbox extends BaseSandbox {
       args: bwrapArgs,
       cwd: this.workspace,
       environment: { PATH: process.env.PATH ?? SAFE_PATH },
-      timeoutMs: this.timeoutMs,
+      timeoutMs: this.effectiveTimeout(timeoutMs),
       maxOutputBytes: this.maxOutputBytes,
     };
   }
 
-  async execute(command: string, args: string[], cwd = '.', environment: Record<string, string> = {}): Promise<SandboxExecutionResult> {
-    const plan = this.plan(command, args, cwd, environment);
-    const result = await runBounded(plan);
-    return { backend: this.backend, isolated: true, command, args: [...args], ...result };
+  async executeRequest(request: SandboxExecutionRequest): Promise<SandboxExecutionResult> {
+    if (request.signal?.aborted) throw new Error('Sandbox execution cancelled before start');
+    const plan = this.plan(request.command, request.args, request.cwd ?? '.', request.environment ?? {}, request.timeoutMs);
+    const result = await runBounded({
+      ...plan,
+      ...(request.stdin !== undefined ? { stdin: request.stdin } : {}),
+      ...(request.signal ? { signal: request.signal } : {}),
+    });
+    return { backend: this.backend, isolated: true, command: request.command, args: [...request.args], ...result };
   }
 }
 
@@ -305,6 +335,8 @@ interface BoundedRunInput {
   environment: Record<string, string>;
   timeoutMs: number;
   maxOutputBytes: number;
+  stdin?: string;
+  signal?: AbortSignal;
 }
 
 interface BoundedRunResult {
@@ -312,42 +344,59 @@ interface BoundedRunResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  cancelled: boolean;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
 }
 
 function runBounded(input: BoundedRunInput): Promise<BoundedRunResult> {
+  if (input.signal?.aborted) return Promise.reject(new Error('Sandbox execution cancelled before start'));
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(input.executable, input.args, { cwd: input.cwd, env: input.environment, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(input.executable, input.args, { cwd: input.cwd, env: input.environment, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
     const stdout = new BoundedBuffer(input.maxOutputBytes);
     const stderr = new BoundedBuffer(input.maxOutputBytes);
     let timedOut = false;
+    let cancelled = false;
     let settled = false;
+    const terminate = (): void => {
+      if (child.exitCode !== null || child.killed) return;
+      child.kill('SIGKILL');
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      terminate();
     }, input.timeoutMs);
+    const onAbort = (): void => {
+      cancelled = true;
+      terminate();
+    };
+    input.signal?.addEventListener('abort', onAbort, { once: true });
     child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      input.signal?.removeEventListener('abort', onAbort);
       reject(error);
     });
     child.on('close', (exitCode) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      input.signal?.removeEventListener('abort', onAbort);
       resolvePromise({
         exitCode: exitCode ?? -1,
         stdout: stdout.text(),
         stderr: stderr.text(),
         timedOut,
+        cancelled,
         stdoutTruncated: stdout.truncated,
         stderrTruncated: stderr.truncated,
       });
     });
+    if (input.stdin !== undefined) child.stdin.end(input.stdin);
+    else child.stdin.end();
   });
 }
 
