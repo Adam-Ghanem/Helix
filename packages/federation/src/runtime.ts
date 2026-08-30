@@ -3,7 +3,7 @@ import { DurableFederationState } from './state.js';
 import { FederationRouter } from './router.js';
 
 export interface FederationTaskDispatcher {
-  dispatchTask(input: { endpoint: string; task: FederationTask; commitLeasedResult?: boolean }): Promise<FederationResult>;
+  dispatchTask(input: { endpoint: string; task: FederationTask }): Promise<FederationResult>;
 }
 
 export interface DistributedRuntimeCoordinatorOptions {
@@ -106,7 +106,7 @@ export class DistributedRuntimeCoordinator {
     let result: FederationResult | undefined;
     let dispatchError: unknown;
     try {
-      result = await this.client.dispatchTask({ endpoint: node.endpoint, task: leasedTask, commitLeasedResult: false });
+      result = await this.client.dispatchTask({ endpoint: node.endpoint, task: leasedTask });
     } catch (error) {
       dispatchError = error;
     } finally {
@@ -115,8 +115,11 @@ export class DistributedRuntimeCoordinator {
     }
 
     if (dispatchError !== undefined) throw dispatchError;
-    if (renewalError !== undefined) throw renewalError;
     if (!result) throw new Error(`Federation task ${task.id} returned no result`);
+
+    const alreadyCommitted = await this.state.getResult(result.id);
+    if (alreadyCommitted) return alreadyCommitted;
+    if (renewalError !== undefined) throw renewalError;
     return this.state.commitLeasedResult(result, now ?? Date.now());
   }
 
