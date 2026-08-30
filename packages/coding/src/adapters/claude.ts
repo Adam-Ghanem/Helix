@@ -1,14 +1,14 @@
 import { access, constants } from 'node:fs/promises';
-import { BoundedProcessRunner } from '../process.js';
+import type { ProcessRunner } from '../process.js';
 import { CodingAgentAdapter, CodingAgentRequest, CodingAgentResult } from './base.js';
 
 export class ClaudeCodeAdapter implements CodingAgentAdapter {
   readonly name = 'claude-code';
   private readonly executable: string;
-  private readonly runner: BoundedProcessRunner;
+  private readonly runner: ProcessRunner;
   private readonly environment: Record<string, string> | undefined;
 
-  constructor(options: { executable: string; runner: BoundedProcessRunner; environment?: Record<string, string> }) {
+  constructor(options: { executable: string; runner: ProcessRunner; environment?: Record<string, string> }) {
     this.executable = options.executable;
     this.runner = options.runner;
     this.environment = options.environment;
