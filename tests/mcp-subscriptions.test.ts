@@ -96,3 +96,55 @@ test('MCP Streamable HTTP subscription close aborts the listen stream and report
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+test('MCP Streamable HTTP subscription close sends notifications/cancelled with the listen request id', async () => {
+  let cancellation: { requestId?: unknown; reason?: unknown } | undefined;
+  const server = createServer(async (request, response) => {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    const message = JSON.parse(body) as { id?: number | string; method: string; params: Record<string, unknown> };
+    if (message.method === 'subscriptions/listen') {
+      response.statusCode = 200;
+      response.setHeader('content-type', 'text/event-stream');
+      response.write(sse({
+        jsonrpc: '2.0', method: 'notifications/subscriptions/acknowledged',
+        params: { notifications: { toolsListChanged: true }, _meta: { 'io.modelcontextprotocol/subscriptionId': message.id } },
+      }));
+      return;
+    }
+    if (message.method === 'notifications/cancelled') {
+      cancellation = message.params as { requestId?: unknown; reason?: unknown };
+      response.statusCode = 202;
+      response.end();
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === 'object');
+
+  const client = new McpClient({ id: 'listen-http-cancel', endpoint: `http://127.0.0.1:${address.port}/mcp`, transport: 'streamable-http', trust: 'reviewed', timeoutMs: 1_000 });
+  try {
+    const subscription = await client.listen({ toolsListChanged: true });
+    await subscription.close();
+    await waitFor(() => cancellation !== undefined);
+    assert.equal(cancellation?.requestId, subscription.id);
+    assert.equal(typeof cancellation?.reason, 'string');
+    assert.equal(await subscription.closed, 'local');
+  } finally {
+    await client.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Condition was not met before timeout');
+}
