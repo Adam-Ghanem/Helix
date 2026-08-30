@@ -150,6 +150,17 @@ export class DurableFederationState {
     return clone(task);
   }
 
+  async importTask(task: FederationTask): Promise<FederationTask> {
+    this.assertInitialized();
+    const existing = this.tasks.get(task.id);
+    if (existing) return clone(existing);
+    validateTask(task);
+    const imported: FederationTask = { ...clone(task), requiredCapabilities: [...new Set(task.requiredCapabilities)] };
+    this.tasks.set(imported.id, imported);
+    await this.persist();
+    return clone(imported);
+  }
+
   async updateTask(taskId: string, patch: Partial<Pick<FederationTask, 'status' | 'attempt' | 'assignedNodeId' | 'error'>>): Promise<FederationTask> {
     this.assertInitialized();
     const current = this.tasks.get(taskId);
@@ -189,9 +200,27 @@ export class DurableFederationState {
     return clone(result);
   }
 
+  async importResult(result: FederationResult): Promise<FederationResult> {
+    this.assertInitialized();
+    const existing = this.results.get(result.id);
+    if (existing) return clone(existing);
+    if (!this.tasks.has(result.taskId)) throw new Error(`Unknown federation task: ${result.taskId}`);
+    validateResult(result);
+    const imported = clone(result);
+    this.results.set(imported.id, imported);
+    await this.persist();
+    return clone(imported);
+  }
+
   async getResult(resultId: string): Promise<FederationResult | undefined> {
     this.assertInitialized();
     const result = this.results.get(resultId);
+    return result ? clone(result) : undefined;
+  }
+
+  async findResultForTask(taskId: string): Promise<FederationResult | undefined> {
+    this.assertInitialized();
+    const result = [...this.results.values()].find((candidate) => candidate.taskId === taskId);
     return result ? clone(result) : undefined;
   }
 
@@ -246,6 +275,17 @@ function validateNode(node: FederationNode): void {
   if (!node.id.trim()) throw new Error('Federation node id is required');
   if (!/^https?:\/\//.test(node.endpoint)) throw new Error('Federation endpoint must use http(s)');
   if (!Array.isArray(node.capabilities) || node.capabilities.some((capability) => !capability.trim())) throw new Error('Federation capabilities must be non-empty strings');
+}
+
+function validateTask(task: FederationTask): void {
+  if (!task.id.trim() || !task.executionId.trim() || !task.taskType.trim() || !task.goal.trim()) throw new Error('Federation task identifiers and goal are required');
+  if (!Array.isArray(task.requiredCapabilities) || task.requiredCapabilities.some((capability) => typeof capability !== 'string' || !capability.trim())) throw new Error('Federation task capabilities are invalid');
+  if (!Number.isInteger(task.attempt) || task.attempt < 0) throw new Error('Federation task attempt must be a non-negative integer');
+}
+
+function validateResult(result: FederationResult): void {
+  if (!result.id.trim() || !result.taskId.trim() || !result.executionId.trim() || !result.nodeId.trim()) throw new Error('Federation result identifiers are required');
+  if (!Number.isFinite(Date.parse(result.createdAt))) throw new Error('Federation result createdAt is invalid');
 }
 
 function normalizeLoad(load: number | undefined): number {
