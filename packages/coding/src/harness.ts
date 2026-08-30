@@ -1,9 +1,15 @@
+import { performance } from 'node:perf_hooks';
 import { AgentRegistry } from '../../agents/src/index.js';
 import { HookEngine, HookEventName, HookRunResult } from '../../hooks/src/index.js';
+import { Trajectory } from '../../learning/src/index.js';
 import { MemoryStore } from '../../memory/src/index.js';
 import { CodingAgentAdapter, CodingAgentRequest, CodingAgentResult } from './adapters/base.js';
 import { CodingSessionStore } from './store.js';
 import { CodingSessionRecord, JudgeVerdict, ReviewVerdict, TestVerdict } from './types.js';
+
+export interface CodingLearningSink {
+  record(trajectory: Trajectory): Promise<unknown> | unknown;
+}
 
 export interface CodingHarnessOptions {
   store: CodingSessionStore;
@@ -11,6 +17,7 @@ export interface CodingHarnessOptions {
   adapter: CodingAgentAdapter;
   memory?: MemoryStore;
   agents?: AgentRegistry;
+  learning?: CodingLearningSink;
   reviewer: (input: { session: CodingSessionRecord; implementation: CodingAgentResult; evidence: Awaited<ReturnType<CodingSessionStore['evidenceForSession']>> }) => Promise<ReviewVerdict>;
   tester: (input: { session: CodingSessionRecord; implementation: CodingAgentResult; evidence: Awaited<ReturnType<CodingSessionStore['evidenceForSession']>> }) => Promise<TestVerdict>;
   judge: (input: { session: CodingSessionRecord; implementation: CodingAgentResult; review: ReviewVerdict; test: TestVerdict; evidence: Awaited<ReturnType<CodingSessionStore['evidenceForSession']>> }) => Promise<JudgeVerdict>;
@@ -32,6 +39,7 @@ export class CodingHarness {
   private readonly adapter: CodingAgentAdapter;
   private readonly memory: MemoryStore | undefined;
   private readonly agents: AgentRegistry | undefined;
+  private readonly learning: CodingLearningSink | undefined;
   private readonly reviewer: CodingHarnessOptions['reviewer'];
   private readonly tester: CodingHarnessOptions['tester'];
   private readonly judge: CodingHarnessOptions['judge'];
@@ -42,6 +50,7 @@ export class CodingHarness {
     this.adapter = options.adapter;
     this.memory = options.memory;
     this.agents = options.agents;
+    this.learning = options.learning;
     this.reviewer = options.reviewer;
     this.tester = options.tester;
     this.judge = options.judge;
@@ -65,6 +74,7 @@ export class CodingHarness {
   }
 
   private async executeAttempt(sessionId: string, input: CodingRunInput, resumed: boolean): Promise<CodingSessionRecord> {
+    const attemptStarted = performance.now();
     await this.store.updateSession(sessionId, { status: 'running' });
     let session = (await this.store.getSession(sessionId))!;
     const preTask = await this.runHook('pre-task', session, { goal: input.goal, requiredCapabilities: input.requiredCapabilities ?? ['coding'], resumed });
@@ -116,9 +126,8 @@ export class CodingHarness {
     if (preReview.action === 'block') return this.block(sessionId, preReview.reason ?? 'pre-review blocked', true);
 
     session = (await this.store.getSession(sessionId))!;
-    const beforeReview = await this.store.evidenceForSession(sessionId);
     let review: ReviewVerdict;
-    try { review = await this.reviewer({ session, implementation, evidence: beforeReview }); }
+    try { review = await this.reviewer({ session, implementation, evidence: await this.store.evidenceForSession(sessionId) }); }
     catch (error) { return this.fail(sessionId, error instanceof Error ? error.message : String(error), 'reviewer'); }
     await this.store.appendEvidence(sessionId, { type: 'review', data: structuredClone(review) as unknown as Record<string, unknown> });
 
@@ -141,7 +150,8 @@ export class CodingHarness {
     const postTask = await this.runHook('post-task', session, { success: accepted, review, test, judge });
     if (postTask.action === 'block') accepted = false;
     const final = await this.store.updateSession(sessionId, { status: accepted ? 'completed' : 'failed', finalVerdict: accepted ? 'accepted' : 'rejected', ...(accepted ? {} : { error: postReview.reason ?? postTask.reason ?? judge.reason }) });
-    await this.learn(final, review, test, judge);
+    await this.rememberOutcome(final, review, test, judge);
+    await this.recordLearning(final, implementation, review, test, judge, Math.max(0, Math.round(performance.now() - attemptStarted)));
     await this.runHook('session-end', final, { status: final.status, verdict: final.finalVerdict });
     return (await this.store.getSession(sessionId))!;
   }
@@ -167,13 +177,39 @@ export class CodingHarness {
     return (await this.store.getSession(sessionId))!;
   }
 
-  private async learn(session: CodingSessionRecord, review: ReviewVerdict, test: TestVerdict, judge: JudgeVerdict): Promise<void> {
+  private async rememberOutcome(session: CodingSessionRecord, review: ReviewVerdict, test: TestVerdict, judge: JudgeVerdict): Promise<void> {
     if (!this.memory || typeof (this.memory as { store?: unknown }).store !== 'function') return;
     try {
       await this.memory.store({
         namespace: 'coding', owner: 'coding-harness', content: `Goal: ${session.goal}\nVerdict: ${session.finalVerdict}\nReview: ${review.summary}\nTests: ${test.summary}\nJudge: ${judge.reason}`,
         importance: session.finalVerdict === 'accepted' ? 0.7 : 0.85, confidence: Math.max(0, Math.min(1, judge.confidence)), source: {}, allowedSubjects: ['coding-harness'],
       });
-    } catch { /* learning is non-critical */ }
+    } catch { /* memory learning is non-critical */ }
+  }
+
+  private async recordLearning(session: CodingSessionRecord, implementation: CodingAgentResult, review: ReviewVerdict, test: TestVerdict, judge: JudgeVerdict, latencyMs: number): Promise<void> {
+    if (!this.learning) return;
+    const reviewQuality = review.approved && !review.findings.some((finding) => finding.severity === 'high' || finding.severity === 'critical') ? 1 : 0;
+    const testQuality = test.passed && test.commands.every((command) => command.exitCode === 0) ? 1 : 0;
+    const quality = Math.max(0, Math.min(1, 0.3 * reviewQuality + 0.3 * testQuality + 0.4 * Math.max(0, Math.min(1, judge.confidence))));
+    const success = session.finalVerdict === 'accepted';
+    const trajectory: Trajectory = {
+      executionId: session.id,
+      steps: [{ taskType: 'coding', strategy: implementation.adapter, latencyMs, costUsd: implementation.usage?.costUsd ?? 0, success }],
+      evaluation: {
+        success,
+        quality,
+        costUsd: implementation.usage?.costUsd ?? 0,
+        latencyMs,
+        reliability: testQuality,
+        toolEfficiency: implementation.commands.length ? testQuality : 1,
+        notes: [review.summary, test.summary, judge.reason],
+      },
+    };
+    try {
+      await this.learning.record(trajectory);
+    } catch (error) {
+      await this.store.appendEvidence(session.id, { type: 'failure', data: { stage: 'learning', optional: true, error: error instanceof Error ? error.message : String(error) } });
+    }
   }
 }
