@@ -11,6 +11,11 @@ import {
   CodingSessionStore,
   DeterministicCodingAdapter,
   GenericCliAdapter,
+  HttpQualityModel,
+  ModelJudge,
+  ModelReviewer,
+  VerificationCommand,
+  VerificationRunner,
   createCommandSafetyHook,
   createEditContextHook,
   createQualityGateHook,
@@ -18,6 +23,7 @@ import {
 } from '../../../packages/coding/src/index.js';
 import { daemonPaths, enqueueExecution, readDaemonStatus, requestDaemonStop } from '../../../packages/daemon/src/index.js';
 import { HookEngine, HookEventName } from '../../../packages/hooks/src/index.js';
+import { DurableLearningEngine } from '../../../packages/learning/src/index.js';
 import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
 import { DurableTaskQueue } from '../../../packages/workers/src/index.js';
 
@@ -119,15 +125,28 @@ async function handleCodeCommand(): Promise<void> {
   const adapterName = optionValue('--adapter') ?? process.env.HELIX_CODE_ADAPTER ?? 'deterministic';
   const adapter = createCodingAdapter(adapterName);
   const hooks = createCodingHooks(store);
+  const learning = new DurableLearningEngine({ stateFile: join(dataDirectory, 'learning.json') });
+  const verificationCommands = parseVerificationCommands(process.env.HELIX_CODE_VERIFY_JSON);
+  const verification = verificationCommands.length ? createVerificationRunner(verificationCommands) : undefined;
+  const qualityModel = createQualityModel();
+  const modelReviewer = qualityModel ? new ModelReviewer({ model: qualityModel }) : undefined;
+  const modelJudge = qualityModel ? new ModelJudge({ model: qualityModel }) : undefined;
   const harness = new CodingHarness({
     store,
     hooks,
     adapter,
     memory: runtime.memory,
     agents: runtime.agents,
-    reviewer: async ({ implementation }) => ({ approved: implementation.success, findings: [], summary: implementation.success ? 'Adapter execution completed; no structured reviewer findings were configured.' : 'Adapter execution failed.' }),
-    tester: async () => ({ passed: true, commands: [], summary: 'No HELIX_CODE_VERIFY commands configured; structural harness verification only.' }),
-    judge: async ({ implementation, review, test }) => ({ accepted: implementation.success && review.approved && test.passed, reason: implementation.success ? 'Configured coding harness gates passed.' : 'Implementation adapter failed.', requiredFixes: [], confidence: implementation.success ? 0.75 : 0 }),
+    learning,
+    reviewer: modelReviewer
+      ? async ({ session, implementation, evidence }) => modelReviewer.review({ goal: session.goal, output: implementation.output, evidence })
+      : async ({ implementation }) => ({ approved: implementation.success, findings: [], summary: implementation.success ? 'Deterministic structural reviewer accepted successful adapter execution.' : 'Adapter execution failed.' }),
+    tester: verification
+      ? async () => verification.run(verificationCommands)
+      : async () => ({ passed: true, commands: [], summary: 'No HELIX_CODE_VERIFY_JSON commands configured; structural harness verification only.' }),
+    judge: modelJudge
+      ? async ({ session, review, test, evidence }) => modelJudge.judge({ goal: session.goal, review, test, evidence })
+      : async ({ implementation, review, test }) => ({ accepted: implementation.success && review.approved && test.passed && test.commands.every((command) => command.exitCode === 0), reason: implementation.success ? 'Deterministic structural quality gates passed.' : 'Implementation adapter failed.', requiredFixes: [], confidence: implementation.success ? 0.75 : 0 }),
   });
   if (action === 'resume') {
     const sessionId = args[2];
@@ -205,6 +224,46 @@ function createCodingAdapter(name: string): CodingAgentAdapter {
     });
   }
   throw new Error(`Unknown coding adapter: ${name}`);
+}
+
+function createVerificationRunner(commands: VerificationCommand[]): VerificationRunner {
+  const workspaceRoot = process.env.HELIX_CODE_WORKSPACE_ROOT ?? process.env.HELIX_CODE_CWD ?? process.cwd();
+  const executables = [...new Set(commands.map((command) => command.executable))];
+  for (const executable of executables) if (!isAbsolute(executable)) throw new Error(`Verification executable must be absolute: ${executable}`);
+  const runner = new BoundedProcessRunner({ allowedExecutables: executables, workspaceRoots: [workspaceRoot], environmentKeys: environmentKeys(), maxStdoutBytes: 1_048_576, maxStderrBytes: 262_144, killGraceMs: 250 });
+  return new VerificationRunner({ runner });
+}
+
+function createQualityModel(): HttpQualityModel | undefined {
+  const endpoint = process.env.HELIX_QUALITY_MODEL_API_URL;
+  const apiKey = process.env.HELIX_QUALITY_MODEL_API_KEY;
+  const model = process.env.HELIX_QUALITY_MODEL;
+  if (!endpoint && !apiKey && !model) return undefined;
+  if (!endpoint || !apiKey || !model) throw new Error('HELIX_QUALITY_MODEL_API_URL, HELIX_QUALITY_MODEL_API_KEY, and HELIX_QUALITY_MODEL must be configured together');
+  return new HttpQualityModel({ endpoint, apiKey, model });
+}
+
+function parseVerificationCommands(raw: string | undefined): VerificationCommand[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw) as unknown; }
+  catch (error) { throw new Error(`HELIX_CODE_VERIFY_JSON must be valid JSON: ${error instanceof Error ? error.message : String(error)}`); }
+  if (!Array.isArray(parsed)) throw new Error('HELIX_CODE_VERIFY_JSON must be a JSON array');
+  return parsed.map((candidate, index) => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new Error(`HELIX_CODE_VERIFY_JSON[${index}] must be an object`);
+    const record = candidate as Record<string, unknown>;
+    if (typeof record.executable !== 'string' || !Array.isArray(record.args) || !record.args.every((item) => typeof item === 'string')) throw new Error(`HELIX_CODE_VERIFY_JSON[${index}] requires executable:string and args:string[]`);
+    if (record.name !== undefined && typeof record.name !== 'string') throw new Error(`HELIX_CODE_VERIFY_JSON[${index}].name must be a string`);
+    if (record.cwd !== undefined && typeof record.cwd !== 'string') throw new Error(`HELIX_CODE_VERIFY_JSON[${index}].cwd must be a string`);
+    if (record.timeoutMs !== undefined && (typeof record.timeoutMs !== 'number' || !Number.isFinite(record.timeoutMs) || record.timeoutMs <= 0)) throw new Error(`HELIX_CODE_VERIFY_JSON[${index}].timeoutMs must be positive`);
+    return {
+      executable: record.executable,
+      args: [...record.args] as string[],
+      ...(typeof record.name === 'string' ? { name: record.name } : {}),
+      ...(typeof record.cwd === 'string' ? { cwd: record.cwd } : {}),
+      ...(typeof record.timeoutMs === 'number' ? { timeoutMs: record.timeoutMs } : {}),
+    };
+  });
 }
 
 function processRunner(executable: string, workspaceRoot: string, envKeys: string[]): BoundedProcessRunner {
