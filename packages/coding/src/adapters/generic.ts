@@ -30,7 +30,7 @@ export class GenericCliAdapter implements CodingAgentAdapter {
     const args = [...(this.options.staticArgs ?? [])];
     const stdin = this.options.promptTransport === 'stdin' ? request.prompt : undefined;
     if (this.options.promptTransport === 'argv') args.push(request.prompt);
-    const result = await this.options.runner.run({ executable: this.options.executable, args, cwd: request.cwd, environment: this.options.environment, ...(stdin !== undefined ? { stdin } : {}), timeoutMs: request.timeoutMs });
+    const result = await this.options.runner.run({ executable: this.options.executable, args, cwd: request.cwd, ...(this.options.environment ? { environment: this.options.environment } : {}), ...(stdin !== undefined ? { stdin } : {}), timeoutMs: request.timeoutMs });
     const parsed = this.options.parse?.(result.stdout, result.stderr) ?? {};
     const success = result.exitCode === 0 && !result.timedOut && !result.cancelled;
     const fallbackError = result.stderr || (result.timedOut ? 'coding agent timed out' : result.cancelled ? 'coding agent cancelled' : `coding agent exited with ${result.exitCode}`);
