@@ -25,7 +25,7 @@ test('verification runner executes structured bounded commands and fails on non-
 });
 
 test('http quality model calls OpenAI-compatible chat completions and returns content', async () => {
-  const requests: Array<{ authorization?: string; body: unknown }> = [];
+  const requests: Array<{ authorization?: string | undefined; body: unknown }> = [];
   const server = createServer(async (request, response) => {
     let body = '';
     for await (const chunk of request) body += chunk;
