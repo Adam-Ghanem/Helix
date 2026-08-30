@@ -1,4 +1,4 @@
-import { TaskId, TaskRecord, TaskStatus, id } from '../../core/src/index.js';
+import { ExecutionRecord, TaskId, TaskRecord, TaskStatus, id } from '../../core/src/index.js';
 
 export interface TaskSpec {
   title: string;
@@ -12,6 +12,37 @@ export type ReplacementTaskSpec = Omit<TaskSpec, 'dependencies'>;
 export interface TaskSupersession {
   superseded: TaskRecord;
   replacements: TaskRecord[];
+}
+
+export interface ReplanProposal {
+  reason: string;
+  replacements: ReplacementTaskSpec[];
+}
+
+export interface ReplanContext {
+  execution: ExecutionRecord;
+  failedTask: TaskRecord;
+  tasks: TaskRecord[];
+  revision: number;
+  remainingTaskCapacity: number;
+  failureReason: string;
+}
+
+export interface RuntimeReplanner {
+  replan(context: ReplanContext): Promise<ReplanProposal | null>;
+}
+
+export class DeterministicFailureReplanner implements RuntimeReplanner {
+  async replan(context: ReplanContext): Promise<ReplanProposal | null> {
+    if (context.remainingTaskCapacity < 1) return null;
+    return {
+      reason: `Repair failed task ${context.failedTask.title}`,
+      replacements: [{
+        title: `Repair ${context.failedTask.title}`,
+        description: `Recover the failed task without repeating completed work. Previous failure: ${context.failureReason}`,
+      }],
+    };
+  }
 }
 
 export class TaskGraph {
