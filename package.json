@@ -15,6 +15,7 @@
     "test:src": "tsx --test tests/**/*.test.ts",
     "dev:api": "tsx apps/api/src/index.ts",
     "dev:cli": "tsx apps/cli/src/index.ts",
+    "dev:daemon": "tsx apps/daemon/src/index.ts",
     "format:check": "tsc -p tsconfig.json --noEmit",
     "verify": "pnpm typecheck && pnpm build && pnpm test",
     "benchmark": "pnpm exec tsc -p tsconfig.json && node benchmarks/runtime.mjs",
