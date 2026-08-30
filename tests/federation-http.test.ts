@@ -64,3 +64,34 @@ test('federation http plane rejects messages signed with the wrong secret', asyn
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('federation http plane accepts signed node heartbeats and persists advertised health', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-fed-heartbeat-'));
+  const secret = 'cluster-secret';
+  const coordinatorState = new DurableFederationState({ stateFile: join(directory, 'coordinator.json'), localNodeId: 'coordinator', secret });
+  await coordinatorState.init();
+  const server = new FederationHttpServer({ nodeId: 'coordinator', secret, state: coordinatorState, execute: async () => ({ success: true }) });
+  const started = await server.start({ host: '127.0.0.1', port: 0 });
+  try {
+    const workerState = new DurableFederationState({ stateFile: join(directory, 'worker.json'), localNodeId: 'worker-1', secret });
+    await workerState.init();
+    const client = new FederationHttpClient({ nodeId: 'worker-1', secret, state: workerState, timeoutMs: 2_000 });
+    const ack = await client.sendHeartbeat({
+      endpoint: started.endpoint,
+      targetNodeId: 'coordinator',
+      node: { id: 'worker-1', endpoint: 'https://worker-1.example', capabilities: ['coding', 'testing'], load: 2 },
+    });
+
+    assert.equal(ack.nodeId, 'coordinator');
+    assert.equal(ack.acceptedNodeId, 'worker-1');
+    const persisted = (await coordinatorState.listNodes()).find((node) => node.id === 'worker-1');
+    assert.equal(persisted?.status, 'online');
+    assert.equal(persisted?.endpoint, 'https://worker-1.example');
+    assert.deepEqual(persisted?.capabilities, ['coding', 'testing']);
+    assert.equal(persisted?.load, 2);
+    assert.ok(persisted?.lastHeartbeat);
+  } finally {
+    await server.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
