@@ -33,6 +33,7 @@ export class GenericCliAdapter implements CodingAgentAdapter {
     const result = await this.options.runner.run({ executable: this.options.executable, args, cwd: request.cwd, environment: this.options.environment, ...(stdin !== undefined ? { stdin } : {}), timeoutMs: request.timeoutMs });
     const parsed = this.options.parse?.(result.stdout, result.stderr) ?? {};
     const success = result.exitCode === 0 && !result.timedOut && !result.cancelled;
+    const fallbackError = result.stderr || (result.timedOut ? 'coding agent timed out' : result.cancelled ? 'coding agent cancelled' : `coding agent exited with ${result.exitCode}`);
     return {
       adapter: this.name,
       success,
@@ -40,7 +41,7 @@ export class GenericCliAdapter implements CodingAgentAdapter {
       changedFiles: [],
       commands: [],
       ...parsed,
-      ...(success ? {} : { error: parsed.error ?? result.stderr || (result.timedOut ? 'coding agent timed out' : result.cancelled ? 'coding agent cancelled' : `coding agent exited with ${result.exitCode}`) }),
+      ...(success ? {} : { error: parsed.error ?? fallbackError }),
     };
   }
 }
