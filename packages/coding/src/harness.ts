@@ -30,8 +30,8 @@ export class CodingHarness {
   private readonly store: CodingSessionStore;
   private readonly hooks: HookEngine;
   private readonly adapter: CodingAgentAdapter;
-  private readonly memory?: MemoryStore;
-  private readonly agents?: AgentRegistry;
+  private readonly memory: MemoryStore | undefined;
+  private readonly agents: AgentRegistry | undefined;
   private readonly reviewer: CodingHarnessOptions['reviewer'];
   private readonly tester: CodingHarnessOptions['tester'];
   private readonly judge: CodingHarnessOptions['judge'];
