@@ -677,6 +677,20 @@ class StreamableHttpMcpTransport implements McpTransport {
   }
 }
 
+interface StdioSubscriptionState {
+  id: number;
+  requestedFilter: McpSubscriptionFilter;
+  honoredFilter?: McpSubscriptionFilter;
+  listener: McpSubscriptionListener;
+  acked: boolean;
+  settled: boolean;
+  resolveAck: (filter: McpSubscriptionFilter) => void;
+  rejectAck: (error: Error) => void;
+  resolveClosed: (reason: McpSubscriptionCloseReason) => void;
+  closed: Promise<McpSubscriptionCloseReason>;
+  ackTimer: NodeJS.Timeout;
+}
+
 class StdioMcpTransport implements McpTransport {
   private nextId = 1;
   private child: ChildProcessWithoutNullStreams | undefined;
@@ -684,6 +698,7 @@ class StdioMcpTransport implements McpTransport {
   private stdoutBuffer = '';
   private stderrTail = '';
   private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  private readonly subscriptions = new Map<number, StdioSubscriptionState>();
   private readonly timeoutMs: number;
   private readonly maxMessageBytes: number;
 
@@ -716,11 +731,51 @@ class StdioMcpTransport implements McpTransport {
     });
   }
 
-  async listen(_filter: McpSubscriptionFilter, _listener: McpSubscriptionListener): Promise<McpSubscription> {
-    throw new Error('MCP subscriptions/listen over stdio is not implemented yet');
+  async listen(filter: McpSubscriptionFilter, listener: McpSubscriptionListener): Promise<McpSubscription> {
+    await this.start();
+    const child = this.child;
+    if (!child) throw new Error(`MCP stdio server ${this.server.id} is not running`);
+    const id = this.nextId++;
+    let resolveAck!: (filter: McpSubscriptionFilter) => void;
+    let rejectAck!: (error: Error) => void;
+    const acknowledged = new Promise<McpSubscriptionFilter>((resolve, reject) => { resolveAck = resolve; rejectAck = reject; });
+    let resolveClosed!: (reason: McpSubscriptionCloseReason) => void;
+    const closed = new Promise<McpSubscriptionCloseReason>((resolve) => { resolveClosed = resolve; });
+    const ackTimer = setTimeout(() => {
+      this.failSubscription(id, new Error(`MCP subscription acknowledgment timed out after ${this.timeoutMs}ms`));
+    }, this.timeoutMs);
+    const state: StdioSubscriptionState = {
+      id,
+      requestedFilter: structuredClone(filter),
+      listener,
+      acked: false,
+      settled: false,
+      resolveAck,
+      rejectAck,
+      resolveClosed,
+      closed,
+      ackTimer,
+    };
+    this.subscriptions.set(id, state);
+    const message = JSON.stringify({ jsonrpc: '2.0', id, method: 'subscriptions/listen', params: withRequestMeta({ notifications: structuredClone(filter) }, this.protocolVersion) });
+    if (Buffer.byteLength(message) > this.maxMessageBytes) {
+      this.failSubscription(id, new Error(`MCP subscription request exceeds ${this.maxMessageBytes} bytes`));
+      return acknowledged.then(() => { throw new Error('unreachable'); });
+    }
+    child.stdin.write(`${message}\n`, 'utf8', (error) => {
+      if (error) this.failSubscription(id, error);
+    });
+    const honoredFilter = await acknowledged;
+    return {
+      id,
+      honoredFilter: structuredClone(honoredFilter),
+      closed,
+      close: async () => this.closeSubscription(id),
+    };
   }
 
   async close(): Promise<void> {
+    await Promise.allSettled([...this.subscriptions.keys()].map((id) => this.closeSubscription(id)));
     const child = this.child;
     this.child = undefined;
     this.starting = undefined;
@@ -789,7 +844,21 @@ class StdioMcpTransport implements McpTransport {
         this.child?.kill('SIGTERM');
         return;
       }
+      if (isJsonRpcNotification(message)) {
+        this.handleSubscriptionNotification(message.method, message.params);
+        continue;
+      }
       if (!isJsonRpcResponse(message) || typeof message.id !== 'number') continue;
+      const subscription = this.subscriptions.get(message.id);
+      if (subscription) {
+        if (message.error) {
+          this.failSubscription(message.id, new McpProtocolError(message.error.message, message.error.code, message.error.data));
+        } else if ('result' in message) {
+          if (!subscription.acked) subscription.rejectAck(new Error(`MCP subscription ${message.id} ended before acknowledgment`));
+          this.settleSubscription(message.id, 'graceful');
+        }
+        continue;
+      }
       const pending = this.pending.get(message.id);
       if (!pending) continue;
       clearTimeout(pending.timer);
@@ -802,12 +871,81 @@ class StdioMcpTransport implements McpTransport {
     }
   }
 
+  private handleSubscriptionNotification(method: string, params: Record<string, unknown>): void {
+    const id = subscriptionIdFromParams(params);
+    if (typeof id !== 'number') return;
+    const state = this.subscriptions.get(id);
+    if (!state) return;
+    try {
+      if (method === 'notifications/subscriptions/acknowledged') {
+        if (state.acked) return;
+        const rawNotifications = params.notifications;
+        if (!rawNotifications || typeof rawNotifications !== 'object' || Array.isArray(rawNotifications)) throw new Error(`MCP subscription ${id} acknowledgment has no notifications filter`);
+        const honored = validateSubscriptionFilter(rawNotifications as McpSubscriptionFilter);
+        if (!isSubscriptionSubset(state.requestedFilter, honored)) throw new Error(`MCP subscription ${id} acknowledgment exceeds the requested filter`);
+        state.acked = true;
+        state.honoredFilter = honored;
+        clearTimeout(state.ackTimer);
+        state.resolveAck(structuredClone(honored));
+        return;
+      }
+      if (!state.acked || !state.honoredFilter) throw new Error(`MCP subscription ${id} received a change notification before acknowledgment`);
+      const event = parseSubscriptionEvent(method, params);
+      if (!event || !subscriptionEventMatches(state.honoredFilter, event)) return;
+      Promise.resolve(state.listener(structuredClone(event))).catch(() => undefined);
+    } catch (error) {
+      this.failSubscription(id, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  private async closeSubscription(id: number): Promise<void> {
+    const state = this.subscriptions.get(id);
+    if (!state || state.settled) return;
+    this.settleSubscription(id, 'local');
+    try {
+      await this.sendNotification('notifications/cancelled', { requestId: id, reason: 'Client closed MCP subscription' });
+    } catch {
+      // The local close reason is authoritative even if the peer disappears during cancellation delivery.
+    }
+  }
+
+  private async sendNotification(method: string, params: Record<string, unknown>): Promise<void> {
+    await this.start();
+    const child = this.child;
+    if (!child) throw new Error(`MCP stdio server ${this.server.id} is not running`);
+    const message = JSON.stringify({ jsonrpc: '2.0', method, params: withRequestMeta(params, this.protocolVersion) });
+    if (Buffer.byteLength(message) > this.maxMessageBytes) throw new Error(`MCP notification exceeds ${this.maxMessageBytes} bytes`);
+    await new Promise<void>((resolve, reject) => child.stdin.write(`${message}\n`, 'utf8', (error) => error ? reject(error) : resolve()));
+  }
+
+  private settleSubscription(id: number, reason: McpSubscriptionCloseReason): void {
+    const state = this.subscriptions.get(id);
+    if (!state || state.settled) return;
+    state.settled = true;
+    clearTimeout(state.ackTimer);
+    state.resolveClosed(reason);
+    this.subscriptions.delete(id);
+  }
+
+  private failSubscription(id: number, error: Error): void {
+    const state = this.subscriptions.get(id);
+    if (!state) return;
+    clearTimeout(state.ackTimer);
+    if (!state.acked) state.rejectAck(error);
+    if (!state.settled) {
+      state.settled = true;
+      state.resolveClosed('remote');
+    }
+    this.subscriptions.delete(id);
+  }
+
   private failAll(error: Error): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
     }
     this.pending.clear();
+    for (const id of [...this.subscriptions.keys()]) this.failSubscription(id, error);
   }
 }
 
@@ -967,11 +1105,17 @@ function subscriptionEventMatches(filter: McpSubscriptionFilter, event: McpSubsc
   if (event.type === 'tools-list-changed') return filter.toolsListChanged === true;
   if (event.type === 'prompts-list-changed') return filter.promptsListChanged === true;
   if (event.type === 'resources-list-changed') return filter.resourcesListChanged === true;
-  return Boolean(filter.resourceSubscriptions?.length);
+  return filter.resourceSubscriptions?.includes(event.uri) ?? false;
 }
 
 function sseData(block: string): string {
   return block.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trimStart()).join('\n');
+}
+
+function isJsonRpcNotification(value: unknown): value is { jsonrpc: '2.0'; method: string; params: Record<string, unknown> } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: unknown };
+  return candidate.jsonrpc === '2.0' && candidate.id === undefined && typeof candidate.method === 'string' && Boolean(candidate.params) && typeof candidate.params === 'object' && !Array.isArray(candidate.params);
 }
 
 function findJsonResponse(text: string, id: number): JsonRpcResponse | undefined {
