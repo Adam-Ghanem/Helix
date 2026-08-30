@@ -4,6 +4,7 @@ import { PublicToolDefinition, ToolRegistry, ToolSchema } from '../../tools/src/
 export const MCP_PROTOCOL_VERSION = '2026-07-28';
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
+const MAX_PAGINATION_PAGES = 100;
 
 export interface McpToolManifest {
   name: string;
@@ -42,6 +43,82 @@ export interface McpRemoteTool {
 export interface McpToolCallResult {
   content?: unknown[];
   isError?: boolean;
+  [key: string]: unknown;
+}
+
+export type McpCacheScope = 'public' | 'private';
+
+export interface McpCachePolicy {
+  ttlMs: number;
+  cacheScope: McpCacheScope;
+}
+
+export interface McpRemoteResource {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+  [key: string]: unknown;
+}
+
+export interface McpResourceTemplate {
+  uriTemplate: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+  [key: string]: unknown;
+}
+
+export interface McpResourceContent {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+  [key: string]: unknown;
+}
+
+export interface McpResourcesResult {
+  resources: McpRemoteResource[];
+  cache?: McpCachePolicy;
+}
+
+export interface McpResourceTemplatesResult {
+  resourceTemplates: McpResourceTemplate[];
+  cache?: McpCachePolicy;
+}
+
+export interface McpReadResourceResult {
+  contents: McpResourceContent[];
+  cache?: McpCachePolicy;
+}
+
+export interface McpPromptArgument {
+  name: string;
+  description?: string;
+  required?: boolean;
+}
+
+export interface McpRemotePrompt {
+  name: string;
+  description?: string;
+  arguments?: McpPromptArgument[];
+  [key: string]: unknown;
+}
+
+export interface McpPromptsResult {
+  prompts: McpRemotePrompt[];
+  cache?: McpCachePolicy;
+}
+
+export interface McpPromptMessage {
+  role: string;
+  content: Record<string, unknown>;
+}
+
+export interface McpGetPromptResult {
+  description?: string;
+  messages: McpPromptMessage[];
   [key: string]: unknown;
 }
 
@@ -107,7 +184,8 @@ export class McpClient {
   async listTools(): Promise<McpRemoteTool[]> {
     const tools: McpRemoteTool[] = [];
     let cursor: string | undefined;
-    do {
+    const seen = new Set<string>();
+    for (let page = 0; page < MAX_PAGINATION_PAGES; page += 1) {
       const result = await this.transport.request('tools/list', cursor ? { cursor } : {});
       if (!result || typeof result !== 'object') throw new Error(`MCP server ${this.server.id} returned an invalid tools/list result`);
       const candidate = result as { tools?: unknown; nextCursor?: unknown };
@@ -123,9 +201,13 @@ export class McpClient {
           inputSchema: structuredClone(tool.inputSchema as Record<string, unknown>),
         });
       }
-      cursor = typeof candidate.nextCursor === 'string' && candidate.nextCursor ? candidate.nextCursor : undefined;
-    } while (cursor);
-    return tools;
+      const next = parseNextCursor(candidate.nextCursor, 'tools/list');
+      if (!next) return tools;
+      if (seen.has(next)) throw new Error(`MCP server ${this.server.id} repeated a tools/list cursor`);
+      seen.add(next);
+      cursor = next;
+    }
+    throw new Error(`MCP server ${this.server.id} exceeded the tools/list pagination limit`);
   }
 
   async callTool(name: string, input: Record<string, unknown>): Promise<McpToolCallResult> {
@@ -133,6 +215,91 @@ export class McpClient {
     const result = await this.transport.request('tools/call', { name, arguments: structuredClone(input) });
     if (!result || typeof result !== 'object') throw new Error(`MCP tool ${name} returned an invalid result`);
     return structuredClone(result as McpToolCallResult);
+  }
+
+  async listResources(): Promise<McpResourcesResult> {
+    const resources: McpRemoteResource[] = [];
+    let cursor: string | undefined;
+    let cache: McpCachePolicy | undefined;
+    const seen = new Set<string>();
+    for (let page = 0; page < MAX_PAGINATION_PAGES; page += 1) {
+      const result = await this.transport.request('resources/list', cursor ? { cursor } : {});
+      const candidate = requireObjectResult(result, this.server.id, 'resources/list');
+      if (!Array.isArray(candidate.resources)) throw new Error(`MCP server ${this.server.id} returned no resources array`);
+      resources.push(...candidate.resources.map((resource, index) => parseResource(resource, this.server.id, index)));
+      const pageCache = parseCachePolicy(candidate, this.server.id, 'resources/list');
+      if (pageCache) cache = pageCache;
+      const next = parseNextCursor(candidate.nextCursor, 'resources/list');
+      if (!next) return { resources, ...(cache ? { cache } : {}) };
+      if (seen.has(next)) throw new Error(`MCP server ${this.server.id} repeated a resources/list cursor`);
+      seen.add(next);
+      cursor = next;
+    }
+    throw new Error(`MCP server ${this.server.id} exceeded the resources/list pagination limit`);
+  }
+
+  async listResourceTemplates(): Promise<McpResourceTemplatesResult> {
+    const resourceTemplates: McpResourceTemplate[] = [];
+    let cursor: string | undefined;
+    let cache: McpCachePolicy | undefined;
+    const seen = new Set<string>();
+    for (let page = 0; page < MAX_PAGINATION_PAGES; page += 1) {
+      const result = await this.transport.request('resources/templates/list', cursor ? { cursor } : {});
+      const candidate = requireObjectResult(result, this.server.id, 'resources/templates/list');
+      if (!Array.isArray(candidate.resourceTemplates)) throw new Error(`MCP server ${this.server.id} returned no resourceTemplates array`);
+      resourceTemplates.push(...candidate.resourceTemplates.map((template, index) => parseResourceTemplate(template, this.server.id, index)));
+      const pageCache = parseCachePolicy(candidate, this.server.id, 'resources/templates/list');
+      if (pageCache) cache = pageCache;
+      const next = parseNextCursor(candidate.nextCursor, 'resources/templates/list');
+      if (!next) return { resourceTemplates, ...(cache ? { cache } : {}) };
+      if (seen.has(next)) throw new Error(`MCP server ${this.server.id} repeated a resources/templates/list cursor`);
+      seen.add(next);
+      cursor = next;
+    }
+    throw new Error(`MCP server ${this.server.id} exceeded the resources/templates/list pagination limit`);
+  }
+
+  async readResource(uri: string): Promise<McpReadResourceResult> {
+    if (!uri.trim()) throw new Error('MCP resource URI is required');
+    const result = await this.transport.request('resources/read', { uri });
+    const candidate = requireObjectResult(result, this.server.id, 'resources/read');
+    if (!Array.isArray(candidate.contents)) throw new Error(`MCP server ${this.server.id} returned no resource contents array`);
+    const contents = candidate.contents.map((content, index) => parseResourceContent(content, this.server.id, index));
+    const cache = parseCachePolicy(candidate, this.server.id, 'resources/read');
+    return { contents, ...(cache ? { cache } : {}) };
+  }
+
+  async listPrompts(): Promise<McpPromptsResult> {
+    const prompts: McpRemotePrompt[] = [];
+    let cursor: string | undefined;
+    let cache: McpCachePolicy | undefined;
+    const seen = new Set<string>();
+    for (let page = 0; page < MAX_PAGINATION_PAGES; page += 1) {
+      const result = await this.transport.request('prompts/list', cursor ? { cursor } : {});
+      const candidate = requireObjectResult(result, this.server.id, 'prompts/list');
+      if (!Array.isArray(candidate.prompts)) throw new Error(`MCP server ${this.server.id} returned no prompts array`);
+      prompts.push(...candidate.prompts.map((prompt, index) => parsePrompt(prompt, this.server.id, index)));
+      const pageCache = parseCachePolicy(candidate, this.server.id, 'prompts/list');
+      if (pageCache) cache = pageCache;
+      const next = parseNextCursor(candidate.nextCursor, 'prompts/list');
+      if (!next) return { prompts, ...(cache ? { cache } : {}) };
+      if (seen.has(next)) throw new Error(`MCP server ${this.server.id} repeated a prompts/list cursor`);
+      seen.add(next);
+      cursor = next;
+    }
+    throw new Error(`MCP server ${this.server.id} exceeded the prompts/list pagination limit`);
+  }
+
+  async getPrompt(name: string, args: Record<string, string> = {}): Promise<McpGetPromptResult> {
+    if (!name.trim()) throw new Error('MCP prompt name is required');
+    const result = await this.transport.request('prompts/get', { name, arguments: structuredClone(args) });
+    const candidate = requireObjectResult(result, this.server.id, 'prompts/get');
+    if (!Array.isArray(candidate.messages)) throw new Error(`MCP server ${this.server.id} returned no prompt messages array`);
+    const messages = candidate.messages.map((message, index) => parsePromptMessage(message, this.server.id, index));
+    return {
+      ...(typeof candidate.description === 'string' ? { description: candidate.description } : {}),
+      messages,
+    };
   }
 
   close(): Promise<void> {
@@ -204,6 +371,31 @@ export class McpGateway {
   async execute(serverId: string, toolName: string, input: Record<string, unknown>): Promise<McpToolCallResult> {
     this.requireServer(serverId);
     return this.client(serverId).callTool(toolName, input);
+  }
+
+  async listResources(serverId: string): Promise<McpResourcesResult> {
+    this.requireServer(serverId);
+    return this.client(serverId).listResources();
+  }
+
+  async listResourceTemplates(serverId: string): Promise<McpResourceTemplatesResult> {
+    this.requireServer(serverId);
+    return this.client(serverId).listResourceTemplates();
+  }
+
+  async readResource(serverId: string, uri: string): Promise<McpReadResourceResult> {
+    this.requireServer(serverId);
+    return this.client(serverId).readResource(uri);
+  }
+
+  async listPrompts(serverId: string): Promise<McpPromptsResult> {
+    this.requireServer(serverId);
+    return this.client(serverId).listPrompts();
+  }
+
+  async getPrompt(serverId: string, name: string, args: Record<string, string> = {}): Promise<McpGetPromptResult> {
+    this.requireServer(serverId);
+    return this.client(serverId).getPrompt(name, args);
   }
 
   listServers(): McpServerDescriptor[] {
@@ -443,6 +635,94 @@ function routingName(params: Record<string, unknown>): string | undefined {
     if (typeof value === 'string' && value) return value;
   }
   return undefined;
+}
+
+function requireObjectResult(result: unknown, serverId: string, method: string): Record<string, unknown> {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error(`MCP server ${serverId} returned an invalid ${method} result`);
+  return result as Record<string, unknown>;
+}
+
+function parseNextCursor(value: unknown, method: string): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string') throw new Error(`MCP ${method} nextCursor must be a string`);
+  return value;
+}
+
+function parseCachePolicy(candidate: Record<string, unknown>, serverId: string, method: string): McpCachePolicy | undefined {
+  const hasTtl = candidate.ttlMs !== undefined;
+  const hasScope = candidate.cacheScope !== undefined;
+  if (!hasTtl && !hasScope) return undefined;
+  if (!hasTtl || !hasScope) throw new Error(`MCP server ${serverId} returned incomplete cache hints for ${method}`);
+  if (typeof candidate.ttlMs !== 'number' || !Number.isInteger(candidate.ttlMs) || candidate.ttlMs < 0) throw new Error(`MCP server ${serverId} returned invalid cache ttlMs for ${method}`);
+  if (candidate.cacheScope !== 'public' && candidate.cacheScope !== 'private') throw new Error(`MCP server ${serverId} returned invalid cacheScope for ${method}`);
+  return { ttlMs: candidate.ttlMs, cacheScope: candidate.cacheScope };
+}
+
+function parseResource(value: unknown, serverId: string, index: number): McpRemoteResource {
+  const resource = requireDefinition(value, serverId, `resource ${index}`);
+  if (typeof resource.uri !== 'string' || !resource.uri.trim()) throw new Error(`MCP server ${serverId} returned a resource without a URI`);
+  if (resource.name !== undefined && typeof resource.name !== 'string') throw new Error(`MCP resource ${resource.uri} has an invalid name`);
+  if (resource.description !== undefined && typeof resource.description !== 'string') throw new Error(`MCP resource ${resource.uri} has an invalid description`);
+  if (resource.mimeType !== undefined && typeof resource.mimeType !== 'string') throw new Error(`MCP resource ${resource.uri} has an invalid mimeType`);
+  if (resource.size !== undefined && (typeof resource.size !== 'number' || !Number.isFinite(resource.size) || resource.size < 0)) throw new Error(`MCP resource ${resource.uri} has an invalid size`);
+  return structuredClone(resource) as McpRemoteResource;
+}
+
+function parseResourceTemplate(value: unknown, serverId: string, index: number): McpResourceTemplate {
+  const template = requireDefinition(value, serverId, `resource template ${index}`);
+  if (typeof template.uriTemplate !== 'string' || !template.uriTemplate.trim()) throw new Error(`MCP server ${serverId} returned a resource template without uriTemplate`);
+  if (template.name !== undefined && typeof template.name !== 'string') throw new Error(`MCP resource template ${template.uriTemplate} has an invalid name`);
+  if (template.description !== undefined && typeof template.description !== 'string') throw new Error(`MCP resource template ${template.uriTemplate} has an invalid description`);
+  if (template.mimeType !== undefined && typeof template.mimeType !== 'string') throw new Error(`MCP resource template ${template.uriTemplate} has an invalid mimeType`);
+  return structuredClone(template) as McpResourceTemplate;
+}
+
+function parseResourceContent(value: unknown, serverId: string, index: number): McpResourceContent {
+  const content = requireDefinition(value, serverId, `resource content ${index}`);
+  if (typeof content.uri !== 'string' || !content.uri.trim()) throw new Error(`MCP server ${serverId} returned resource content without a URI`);
+  if (content.mimeType !== undefined && typeof content.mimeType !== 'string') throw new Error(`MCP resource content ${content.uri} has an invalid mimeType`);
+  if (content.text !== undefined && typeof content.text !== 'string') throw new Error(`MCP resource content ${content.uri} has invalid text`);
+  if (content.blob !== undefined && typeof content.blob !== 'string') throw new Error(`MCP resource content ${content.uri} has an invalid blob`);
+  if (content.text === undefined && content.blob === undefined) throw new Error(`MCP resource content ${content.uri} has neither text nor blob data`);
+  return structuredClone(content) as McpResourceContent;
+}
+
+function parsePrompt(value: unknown, serverId: string, index: number): McpRemotePrompt {
+  const prompt = requireDefinition(value, serverId, `prompt ${index}`);
+  if (typeof prompt.name !== 'string' || !prompt.name.trim()) throw new Error(`MCP server ${serverId} returned a prompt without a name`);
+  if (prompt.description !== undefined && typeof prompt.description !== 'string') throw new Error(`MCP prompt ${prompt.name} has an invalid description`);
+  if (prompt.arguments !== undefined) {
+    if (!Array.isArray(prompt.arguments)) throw new Error(`MCP prompt ${prompt.name} has invalid arguments`);
+    prompt.arguments = prompt.arguments.map((argument, argumentIndex) => parsePromptArgument(argument, serverId, prompt.name as string, argumentIndex));
+  }
+  return structuredClone(prompt) as McpRemotePrompt;
+}
+
+function parsePromptArgument(value: unknown, serverId: string, promptName: string, index: number): McpPromptArgument {
+  const argument = requireDefinition(value, serverId, `prompt argument ${index}`);
+  if (typeof argument.name !== 'string' || !argument.name.trim()) throw new Error(`MCP prompt ${promptName} returned an argument without a name`);
+  if (argument.description !== undefined && typeof argument.description !== 'string') throw new Error(`MCP prompt ${promptName} has an invalid argument description`);
+  if (argument.required !== undefined && typeof argument.required !== 'boolean') throw new Error(`MCP prompt ${promptName} has an invalid required flag`);
+  return {
+    name: argument.name,
+    ...(typeof argument.description === 'string' ? { description: argument.description } : {}),
+    ...(typeof argument.required === 'boolean' ? { required: argument.required } : {}),
+  };
+}
+
+function parsePromptMessage(value: unknown, serverId: string, index: number): McpPromptMessage {
+  const message = requireDefinition(value, serverId, `prompt message ${index}`);
+  if (typeof message.role !== 'string' || !message.role.trim()) throw new Error(`MCP server ${serverId} returned a prompt message without a role`);
+  if (!message.content || typeof message.content !== 'object' || Array.isArray(message.content)) throw new Error(`MCP server ${serverId} returned invalid prompt message content`);
+  const content = message.content as Record<string, unknown>;
+  if (typeof content.type !== 'string' || !content.type) throw new Error(`MCP server ${serverId} returned prompt content without a type`);
+  if (content.type === 'text' && typeof content.text !== 'string') throw new Error(`MCP server ${serverId} returned invalid prompt text content`);
+  return { role: message.role, content: structuredClone(content) };
+}
+
+function requireDefinition(value: unknown, serverId: string, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`MCP server ${serverId} returned invalid ${label}`);
+  return value as Record<string, unknown>;
 }
 
 function findJsonResponse(text: string, id: number): JsonRpcResponse | undefined {
