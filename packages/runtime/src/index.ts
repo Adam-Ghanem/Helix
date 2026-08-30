@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { AgentRegistry } from '../../agents/src/index.js';
 import { EventStore } from '../../durable/src/index.js';
 import { DEFAULT_BUDGET, EventEnvelope, ExecutionInput, ExecutionRecord, ResourceUsage, StructuredDecision, TaskRecord, ToolRequest, id, timestamp, withDefaultBudget } from '../../core/src/index.js';
-import { defaultPlan, TaskGraph } from '../../planner/src/index.js';
+import { defaultPlan, DeterministicFailureReplanner, ReplanProposal, RuntimeReplanner, TaskGraph } from '../../planner/src/index.js';
 import { AgentRouter, RoutingCandidate } from '../../router/src/index.js';
 import { PolicyEngine, secureDefaultRules } from '../../policy/src/index.js';
 import { LeaseScheduler } from '../../scheduler/src/index.js';
@@ -87,12 +87,15 @@ export interface RuntimeOptions {
   scheduler?: LeaseScheduler;
   memory?: MemoryStore;
   telemetry?: Telemetry;
+  replanner?: RuntimeReplanner;
+  maxReplans?: number;
 }
 
 export interface ExecutionView {
   execution: ExecutionRecord;
   tasks: TaskRecord[];
   events: EventEnvelope[];
+  planRevision: number;
 }
 
 export class HelixRuntime {
@@ -104,11 +107,16 @@ export class HelixRuntime {
   readonly provider: ModelProvider;
   readonly memory: MemoryStore;
   readonly telemetry: Telemetry;
+  readonly replanner: RuntimeReplanner;
+  readonly maxReplans: number;
   private readonly executions = new Map<string, ExecutionRecord>();
   private readonly graphs = new Map<string, TaskGraph>();
+  private readonly planRevisions = new Map<string, number>();
   private initialized = false;
 
   constructor(options: RuntimeOptions) {
+    const maxReplans = options.maxReplans ?? 2;
+    if (!Number.isInteger(maxReplans) || maxReplans < 0) throw new Error('maxReplans must be a non-negative integer');
     this.events = new EventStore({ directory: options.dataDirectory });
     this.agents = options.agents ?? new AgentRegistry();
     this.router = options.router ?? new AgentRouter();
@@ -117,6 +125,8 @@ export class HelixRuntime {
     this.provider = options.provider ?? new DeterministicProvider();
     this.memory = options.memory ?? new MemoryStore(options.dataDirectory);
     this.telemetry = options.telemetry ?? new Telemetry();
+    this.replanner = options.replanner ?? new DeterministicFailureReplanner();
+    this.maxReplans = maxReplans;
   }
 
   async init(): Promise<void> {
@@ -147,6 +157,7 @@ export class HelixRuntime {
     execution.usage.tasks = tasks.length;
     this.executions.set(execution.id, execution);
     this.graphs.set(execution.id, graph);
+    this.planRevisions.set(execution.id, 0);
     await this.events.append({ type: 'execution.started', executionId: execution.id, payload: { execution, idempotencyKey: `execution:${execution.id}:started` }, idempotencyKey: `execution:${execution.id}:started` });
     for (const task of tasks) await this.events.append({ type: 'task.created', executionId: execution.id, taskId: task.id, payload: task, idempotencyKey: `task:${task.id}:created` });
     await this.events.append({ type: 'plan.created', executionId: execution.id, payload: { taskIds: execution.taskIds, criticalPathMs: graph.criticalPathMs() } });
@@ -176,7 +187,12 @@ export class HelixRuntime {
     const execution = this.executions.get(executionId);
     const graph = this.graphs.get(executionId);
     if (!execution || !graph) throw new Error(`Unknown execution: ${executionId}`);
-    return { execution: structuredClone(execution), tasks: graph.all(), events: await this.events.read((event) => event.executionId === executionId) };
+    return {
+      execution: structuredClone(execution),
+      tasks: graph.all(),
+      events: await this.events.read((event) => event.executionId === executionId),
+      planRevision: this.planRevisions.get(executionId) ?? 0,
+    };
   }
 
   async requestTool(request: ToolRequest): Promise<{ allowed: boolean; reason: string; approvalId?: string }> {
@@ -261,6 +277,14 @@ export class HelixRuntime {
     const started = Date.now();
     try {
       while (execution.status === 'running' && graph.all().some((task) => ['pending', 'ready', 'running'].includes(task.status))) {
+        const failedBeforeBatch = graph.all().filter((task) => task.status === 'failed');
+        if (failedBeforeBatch.length) {
+          const repaired = await this.repairFailedTasks(execution, graph, failedBeforeBatch);
+          if (!repaired) break;
+          if (Date.now() - started > execution.budget.maxRuntimeMs) throw new Error('Execution exceeded runtime budget');
+          continue;
+        }
+
         const ready = graph.ready();
         if (!ready.length) {
           if (graph.all().some((task) => task.status === 'running')) break;
@@ -270,6 +294,13 @@ export class HelixRuntime {
         if (Date.now() - started > execution.budget.maxRuntimeMs) throw new Error('Execution exceeded runtime budget');
       }
       if (execution.status !== 'running') return;
+
+      const remainingFailures = graph.all().filter((task) => task.status === 'failed');
+      if (remainingFailures.length) {
+        const repaired = await this.repairFailedTasks(execution, graph, remainingFailures);
+        if (repaired) return this.runExecution(executionId);
+      }
+
       const failed = graph.all().filter((task) => task.status === 'failed');
       execution.status = failed.length ? 'failed' : 'completed';
       execution.updatedAt = timestamp();
@@ -283,6 +314,102 @@ export class HelixRuntime {
       execution.usage.runtimeMs = Date.now() - started;
       await this.events.append({ type: 'execution.failed', executionId, payload: { execution, error: execution.error } });
     }
+  }
+
+  private async repairFailedTasks(execution: ExecutionRecord, graph: TaskGraph, failedTasks: TaskRecord[]): Promise<boolean> {
+    let repairedAny = false;
+    for (const failedTask of failedTasks) {
+      if (graph.get(failedTask.id).status !== 'failed') continue;
+      const revision = this.planRevisions.get(execution.id) ?? 0;
+      if (revision >= this.maxReplans) {
+        await this.rejectReplan(execution.id, failedTask.id, `maxReplans limit reached at revision ${revision}`);
+        return false;
+      }
+
+      const remainingTaskCapacity = Math.max(0, execution.budget.maxTasks - graph.all().length);
+      let proposal: ReplanProposal | null;
+      try {
+        proposal = await this.replanner.replan({
+          execution: structuredClone(execution),
+          failedTask: graph.get(failedTask.id),
+          tasks: graph.all(),
+          revision,
+          remainingTaskCapacity,
+          failureReason: graph.get(failedTask.id).error ?? 'unknown task failure',
+        });
+      } catch (error) {
+        await this.rejectReplan(execution.id, failedTask.id, `replanner error: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      }
+
+      const proposalError = validateReplanProposal(proposal);
+      if (proposalError) {
+        await this.rejectReplan(execution.id, failedTask.id, proposalError);
+        return false;
+      }
+      if (graph.all().length + proposal!.replacements.length > execution.budget.maxTasks) {
+        await this.rejectReplan(execution.id, failedTask.id, 'replan would exceed maxTasks budget');
+        return false;
+      }
+
+      let supersession: ReturnType<TaskGraph['supersedeFailed']>;
+      try {
+        supersession = graph.supersedeFailed(failedTask.id, proposal!.replacements, execution.id);
+      } catch (error) {
+        await this.rejectReplan(execution.id, failedTask.id, `invalid replan: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      }
+
+      const nextRevision = revision + 1;
+      const currentTasks = graph.all();
+      execution.taskIds = currentTasks.map((task) => task.id);
+      execution.usage.tasks = currentTasks.length;
+      execution.updatedAt = timestamp();
+
+      await this.events.append({
+        type: 'task.superseded',
+        executionId: execution.id,
+        taskId: failedTask.id,
+        payload: {
+          superseded: supersession.superseded,
+          replacementIds: supersession.replacements.map((task) => task.id),
+          reason: proposal!.reason,
+        },
+      });
+      for (const replacement of supersession.replacements) {
+        await this.events.append({
+          type: 'task.created',
+          executionId: execution.id,
+          taskId: replacement.id,
+          payload: replacement,
+          idempotencyKey: `task:${replacement.id}:created`,
+        });
+      }
+      await this.events.append({
+        type: 'plan.replanned',
+        executionId: execution.id,
+        payload: {
+          revision: nextRevision,
+          failedTaskId: failedTask.id,
+          replacementIds: supersession.replacements.map((task) => task.id),
+          reason: proposal!.reason,
+          tasks: currentTasks,
+        },
+      });
+      this.planRevisions.set(execution.id, nextRevision);
+      this.telemetry.recordMetric('helix.plan.replanned', 1, { provider: this.provider.name });
+      repairedAny = true;
+    }
+    return repairedAny && graph.all().every((task) => task.status !== 'failed');
+  }
+
+  private async rejectReplan(executionId: string, failedTaskId: string, reason: string): Promise<void> {
+    await this.events.append({
+      type: 'plan.replan_rejected',
+      executionId,
+      taskId: failedTaskId,
+      payload: { failedTaskId, reason, revision: this.planRevisions.get(executionId) ?? 0 },
+    });
   }
 
   private async runTask(execution: ExecutionRecord, graph: TaskGraph, task: TaskRecord): Promise<void> {
@@ -323,7 +450,10 @@ export class HelixRuntime {
   private rebuild(event: EventEnvelope): void {
     if (event.type === 'execution.started') {
       const payload = event.payload as { execution: ExecutionRecord };
-      if (payload.execution) this.executions.set(payload.execution.id, structuredClone(payload.execution));
+      if (payload.execution) {
+        this.executions.set(payload.execution.id, structuredClone(payload.execution));
+        this.planRevisions.set(payload.execution.id, 0);
+      }
       return;
     }
     if (!event.executionId) return;
@@ -335,10 +465,19 @@ export class HelixRuntime {
       return;
     }
     if (!execution) return;
-    const graph = this.graphs.get(event.executionId);
+    let graph = this.graphs.get(event.executionId);
     if (event.type === 'execution.paused' || event.type === 'execution.resumed' || event.type === 'execution.cancelled' || event.type === 'execution.completed' || event.type === 'execution.failed') {
       const payload = event.payload as { execution?: ExecutionRecord };
       if (payload.execution) this.executions.set(event.executionId, structuredClone(payload.execution));
+      return;
+    }
+    if (event.type === 'plan.replanned') {
+      const payload = event.payload as { revision?: number; tasks?: TaskRecord[] };
+      if (Array.isArray(payload.tasks)) {
+        this.graphs.set(event.executionId, new TaskGraph(payload.tasks));
+        graph = this.graphs.get(event.executionId);
+      }
+      if (Number.isInteger(payload.revision) && (payload.revision ?? -1) >= 0) this.planRevisions.set(event.executionId, payload.revision!);
       return;
     }
     if (!graph || !event.taskId) return;
@@ -354,6 +493,8 @@ export class HelixRuntime {
       const payload = event.payload as { error?: string };
       if (payload.error) graph.update(event.taskId, { error: payload.error });
       graph.setStatus(event.taskId, 'failed');
+    } else if (event.type === 'task.superseded') {
+      graph.setStatus(event.taskId, 'skipped');
     }
   }
 
@@ -368,6 +509,19 @@ export class HelixRuntime {
     if (!graph) throw new Error(`Unknown execution graph: ${executionId}`);
     return graph;
   }
+}
+
+function validateReplanProposal(proposal: ReplanProposal | null): string | undefined {
+  if (!proposal) return 'replanner declined repair';
+  if (typeof proposal.reason !== 'string' || !proposal.reason.trim()) return 'replan reason is required';
+  if (!Array.isArray(proposal.replacements) || !proposal.replacements.length) return 'replan requires at least one replacement task';
+  for (const replacement of proposal.replacements) {
+    if (!replacement || typeof replacement !== 'object') return 'replan contains an invalid replacement task';
+    if (typeof replacement.title !== 'string' || !replacement.title.trim()) return 'replacement task title is required';
+    if (typeof replacement.description !== 'string' || !replacement.description.trim()) return 'replacement task description is required';
+    if (replacement.estimatedMs !== undefined && (!Number.isFinite(replacement.estimatedMs) || replacement.estimatedMs <= 0)) return 'replacement task estimatedMs must be greater than zero';
+  }
+  return undefined;
 }
 
 export { DEFAULT_BUDGET };
