@@ -5,4 +5,5 @@ export * from './adapters/base.js';
 export * from './adapters/generic.js';
 export * from './adapters/claude.js';
 export * from './builtins.js';
+export * from './quality.js';
 export * from './harness.js';
