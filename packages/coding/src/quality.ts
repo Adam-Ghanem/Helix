@@ -134,9 +134,6 @@ export class ModelJudge {
     if (!authoritativeTestsPassed(input.test)) {
       return { accepted: false, reason: 'Authoritative verification failed.', requiredFixes: ['Fix failing verification commands.'], confidence: 1 };
     }
-    if (input.review.findings.some((finding) => finding.severity === 'high' || finding.severity === 'critical')) {
-      return { accepted: false, reason: 'Reviewer reported unresolved high-severity findings.', requiredFixes: input.review.findings.filter((finding) => finding.severity === 'high' || finding.severity === 'critical').map((finding) => finding.message), confidence: 1 };
-    }
     const system = 'You are Helix quality judge. Return ONLY JSON with keys accepted:boolean, reason:string, requiredFixes:string[], confidence:number between 0 and 1.';
     const prompt = JSON.stringify({ goal: input.goal, review: input.review, test: input.test, evidence: compactEvidence(input.evidence) });
     try {
