@@ -33,7 +33,11 @@ export interface BoundedProcessResult {
   cancelled: boolean;
 }
 
-export class BoundedProcessRunner {
+export interface ProcessRunner {
+  run(request: BoundedProcessRequest): Promise<BoundedProcessResult>;
+}
+
+export class BoundedProcessRunner implements ProcessRunner {
   private readonly options: Required<BoundedProcessRunnerOptions>;
 
   constructor(options: BoundedProcessRunnerOptions) {
