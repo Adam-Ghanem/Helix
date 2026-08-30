@@ -1,21 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { ExecutableSandbox, SandboxExecutionResult } from '../packages/sandbox/src/index.js';
+import type { ExecutableSandbox, SandboxExecutionRequest, SandboxExecutionResult } from '../packages/sandbox/src/index.js';
 import { SandboxProcessRunner } from '../packages/coding/src/index.js';
 
 test('sandbox process runner preserves coding runner contract over isolated execution', async () => {
   const calls: Array<{ command: string; args: string[]; cwd: string; environment: Record<string, string>; stdin?: string }> = [];
+  const executeRequest = async (request: SandboxExecutionRequest): Promise<SandboxExecutionResult> => {
+    calls.push({
+      command: request.command,
+      args: [...request.args],
+      cwd: request.cwd ?? '.',
+      environment: { ...(request.environment ?? {}) },
+      ...(request.stdin !== undefined ? { stdin: request.stdin } : {}),
+    });
+    return {
+      backend: 'bubblewrap', isolated: true, command: request.command, args: [...request.args], exitCode: 0,
+      stdout: 'ok', stderr: '', timedOut: false, cancelled: false, stdoutTruncated: false, stderrTruncated: false,
+    };
+  };
   const sandbox: ExecutableSandbox = {
     backend: 'bubblewrap',
     isolated: true,
-    async execute(command, args, cwd = '.', environment = {}, stdin) {
-      calls.push({ command, args: [...args], cwd, environment: { ...environment }, ...(stdin !== undefined ? { stdin } : {}) });
-      const result: SandboxExecutionResult = {
-        backend: 'bubblewrap', isolated: true, command, args: [...args], exitCode: 0,
-        stdout: 'ok', stderr: '', timedOut: false, stdoutTruncated: false, stderrTruncated: false,
-      };
-      return result;
-    },
+    execute: (command, args, cwd = '.', environment = {}) => executeRequest({ command, args, cwd, environment }),
+    executeRequest,
   };
   const runner = new SandboxProcessRunner({ sandbox });
   const result = await runner.run({ executable: '/usr/bin/tool', args: ['--json'], cwd: '/workspace/project', environment: { TOKEN: 'x' }, stdin: 'prompt', timeoutMs: 1000 });
@@ -29,13 +36,15 @@ test('sandbox process runner preserves coding runner contract over isolated exec
 
 test('sandbox process runner rejects a request cancelled before execution', async () => {
   let executed = false;
+  const executeRequest = async (request: SandboxExecutionRequest): Promise<SandboxExecutionResult> => {
+    executed = true;
+    return { backend: 'process', isolated: false, command: request.command, args: [...request.args], exitCode: 0, stdout: '', stderr: '', timedOut: false, cancelled: false, stdoutTruncated: false, stderrTruncated: false };
+  };
   const sandbox: ExecutableSandbox = {
     backend: 'process',
     isolated: false,
-    async execute(command, args): Promise<SandboxExecutionResult> {
-      executed = true;
-      return { backend: 'process', isolated: false, command, args, exitCode: 0, stdout: '', stderr: '', timedOut: false, stdoutTruncated: false, stderrTruncated: false };
-    },
+    execute: (command, args, cwd = '.', environment = {}) => executeRequest({ command, args, cwd, environment }),
+    executeRequest,
   };
   const controller = new AbortController();
   controller.abort();
