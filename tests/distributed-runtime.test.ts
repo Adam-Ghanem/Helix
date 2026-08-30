@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -159,6 +159,34 @@ test('distributed coordinator refuses a new lease after max attempts', async () 
     assert.equal((await state.getTask(task.id))?.attempt, 1);
     assert.equal((await state.getTask(task.id))?.status, 'queued');
     assert.equal((await state.listLeases()).length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('durable federation state migrates version 1 files without losing result attempts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'helix-federation-v1-'));
+  try {
+    const stateFile = join(directory, 'state.json');
+    const createdAt = '2026-08-30T10:00:00.000Z';
+    await writeFile(stateFile, JSON.stringify({
+      version: 1,
+      nodes: [{ id: 'node-a', endpoint: 'https://node-a.example', capabilities: ['coding'], status: 'online', lastHeartbeat: createdAt, load: 1 }],
+      tasks: [{
+        id: 'task-v1', executionId: 'ex-v1', taskType: 'coding', goal: 'legacy state', requiredCapabilities: ['coding'], payload: {},
+        assignedNodeId: 'node-a', status: 'completed', attempt: 2, createdAt, updatedAt: createdAt,
+      }],
+      results: [{ id: 'result-v1', taskId: 'task-v1', executionId: 'ex-v1', nodeId: 'node-a', success: true, output: { migrated: true }, createdAt }],
+      seenMessages: [],
+    }, null, 2));
+
+    const state = new DurableFederationState({ stateFile, localNodeId: 'coordinator', secret: 'cluster-secret' });
+    await state.init();
+    assert.equal((await state.getTask('task-v1'))?.status, 'completed');
+    assert.equal((await state.getResult('result-v1'))?.attempt, 2);
+    assert.deepEqual((await state.getResult('result-v1'))?.output, { migrated: true });
+    assert.equal((await state.listLeases()).length, 0);
+    assert.equal((await state.listNodes())[0]?.id, 'node-a');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
