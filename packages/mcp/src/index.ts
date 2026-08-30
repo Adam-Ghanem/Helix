@@ -653,6 +653,11 @@ class StreamableHttpMcpTransport implements McpTransport {
         localClose = true;
         settle('local');
         controller.abort();
+        try {
+          await this.sendNotification('notifications/cancelled', { requestId: id, reason: 'Client closed MCP subscription' });
+        } catch {
+          // The local close reason remains authoritative if cancellation delivery races with peer shutdown.
+        }
       },
     };
     this.subscriptions.add(subscription);
@@ -663,6 +668,28 @@ class StreamableHttpMcpTransport implements McpTransport {
   async close(): Promise<void> {
     await Promise.allSettled([...this.subscriptions].map((subscription) => subscription.close()));
     this.subscriptions.clear();
+  }
+
+  private async sendNotification(method: string, params: Record<string, unknown>): Promise<void> {
+    const body = JSON.stringify({ jsonrpc: '2.0', method, params: withRequestMeta(params, this.protocolVersion) });
+    if (Buffer.byteLength(body) > this.maxMessageBytes) throw new Error(`MCP notification exceeds ${this.maxMessageBytes} bytes`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(this.server.endpoint, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: this.headers(method, routingName(params)),
+        body,
+      });
+      if (!response.ok) throw new Error(`MCP notification ${method} failed with HTTP ${response.status}`);
+      await response.body?.cancel();
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') throw new Error(`MCP notification timed out after ${this.timeoutMs}ms`);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private headers(method: string, name?: string): Record<string, string> {
