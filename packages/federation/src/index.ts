@@ -6,6 +6,7 @@ export interface FederationNode {
   capabilities: string[];
   status: 'online' | 'offline' | 'quarantined';
   lastHeartbeat?: string;
+  load?: number;
 }
 
 export interface FederationMessage<T> {
@@ -59,3 +60,7 @@ export class FederationRegistry {
     return createHmac('sha256', secret).update(JSON.stringify(message)).digest('hex');
   }
 }
+
+export * from './state.js';
+export * from './router.js';
+export * from './network.js';
