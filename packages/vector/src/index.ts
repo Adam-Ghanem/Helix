@@ -123,17 +123,28 @@ export class PersistentVectorIndex {
     this.initialized = true;
   }
 
-  async upsert(input: VectorRecord): Promise<void> {
+  async has(id: string): Promise<boolean> {
     await this.init();
-    const embedding = validateEmbedding(input.embedding, `record ${input.id}`);
-    const record: VectorRecord = {
+    return this.records.has(id);
+  }
+
+  async upsert(input: VectorRecord): Promise<void> {
+    return this.upsertMany([input]);
+  }
+
+  async upsertMany(inputs: VectorRecord[]): Promise<void> {
+    if (!inputs.length) return;
+    await this.init();
+    const records = inputs.map((input) => ({
       ...input,
-      embedding,
+      embedding: validateEmbedding(input.embedding, `record ${input.id}`),
       allowedSubjects: [...new Set(input.allowedSubjects)],
       metadata: structuredClone(input.metadata),
-    };
+    }));
+    const dimensions = records[0]?.embedding.length;
+    if (!dimensions || records.some((record) => record.embedding.length !== dimensions)) throw new Error('Vector batch contains inconsistent embedding dimensions');
     await this.enqueue(async () => {
-      this.records.set(record.id, record);
+      for (const record of records) this.records.set(record.id, record);
       await this.persist();
     });
   }
