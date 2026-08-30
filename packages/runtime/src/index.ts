@@ -276,7 +276,7 @@ export class HelixRuntime {
     const graph = this.graphs.get(executionId)!;
     const started = Date.now();
     try {
-      while (execution.status === 'running' && graph.all().some((task) => ['pending', 'ready', 'running'].includes(task.status))) {
+      while (execution.status === 'running' && graph.all().some((task) => ['pending', 'ready', 'running', 'failed'].includes(task.status))) {
         const failedBeforeBatch = graph.all().filter((task) => task.status === 'failed');
         if (failedBeforeBatch.length) {
           const repaired = await this.repairFailedTasks(execution, graph, failedBeforeBatch);
@@ -294,12 +294,6 @@ export class HelixRuntime {
         if (Date.now() - started > execution.budget.maxRuntimeMs) throw new Error('Execution exceeded runtime budget');
       }
       if (execution.status !== 'running') return;
-
-      const remainingFailures = graph.all().filter((task) => task.status === 'failed');
-      if (remainingFailures.length) {
-        const repaired = await this.repairFailedTasks(execution, graph, remainingFailures);
-        if (repaired) return this.runExecution(executionId);
-      }
 
       const failed = graph.all().filter((task) => task.status === 'failed');
       execution.status = failed.length ? 'failed' : 'completed';
