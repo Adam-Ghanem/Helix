@@ -283,8 +283,8 @@ export class DurableFederationState {
       const task = this.tasks.get(lease.taskId);
       if (task && task.status === 'running' && task.leaseId === lease.id && !this.hasResultForAttempt(task.id, lease.attempt)) {
         task.status = 'queued';
-        task.assignedNodeId = undefined;
-        task.leaseId = undefined;
+        delete task.assignedNodeId;
+        delete task.leaseId;
         task.updatedAt = new Date(now).toISOString();
       }
       changed = true;
@@ -350,7 +350,7 @@ export class DurableFederationState {
     this.results.set(committed.id, committed);
     this.leases.delete(lease.id);
     task.status = committed.success ? 'completed' : 'failed';
-    task.leaseId = undefined;
+    delete task.leaseId;
     if (committed.success) delete task.error;
     else task.error = committed.error ?? 'Federation task failed';
     task.updatedAt = new Date(now).toISOString();
