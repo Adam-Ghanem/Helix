@@ -1,12 +1,17 @@
 import { createServer, IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { DurableFederationState, FederationResult, FederationTask } from './state.js';
+import { DurableFederationState, FederationNodeHeartbeat, FederationResult, FederationTask } from './state.js';
 import { FederationMessage, FederationRegistry } from './index.js';
 
 export interface FederationExecutionOutcome {
   success: boolean;
   output?: unknown;
   error?: string;
+}
+
+export interface FederationHeartbeatAck {
+  nodeId: string;
+  acceptedNodeId: string;
 }
 
 export interface FederationHttpServerOptions {
@@ -78,7 +83,7 @@ export class FederationHttpServer {
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    if (request.method !== 'POST' || request.url !== '/v1/federation/task') {
+    if (request.method !== 'POST' || !['/v1/federation/task', '/v1/federation/heartbeat'].includes(request.url ?? '')) {
       json(response, 404, { error: 'not-found' });
       return;
     }
@@ -93,9 +98,43 @@ export class FederationHttpServer {
       return;
     }
 
+    if (request.url === '/v1/federation/heartbeat') {
+      await this.handleHeartbeat(body.text, response);
+      return;
+    }
+    await this.handleTask(body.text, response);
+  }
+
+  private async handleHeartbeat(body: string, response: ServerResponse): Promise<void> {
+    let message: FederationMessage<{ kind: 'heartbeat'; node: FederationNodeHeartbeat }>;
+    try {
+      const parsed = JSON.parse(body) as unknown;
+      if (!isHeartbeatMessage(parsed)) throw new Error('invalid federation heartbeat envelope');
+      message = parsed;
+    } catch (error) {
+      json(response, 400, { error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+
+    const acceptance = await this.state.acceptMessage(message);
+    if (!acceptance.accepted) {
+      json(response, acceptanceStatus(acceptance.reason), { error: acceptance.reason });
+      return;
+    }
+    if (message.from !== message.payload.node.id) {
+      json(response, 403, { error: 'heartbeat source does not match advertised node' });
+      return;
+    }
+
+    const node = await this.state.heartbeatNode(message.payload.node);
+    const payload = { kind: 'heartbeat-ack' as const, nodeId: this.nodeId, acceptedNodeId: node.id };
+    json(response, 200, this.registry.sign(this.nodeId, message.from, payload, this.secret, this.resultTtlMs));
+  }
+
+  private async handleTask(body: string, response: ServerResponse): Promise<void> {
     let message: FederationMessage<{ kind: 'task'; task: FederationTask }>;
     try {
-      const parsed = JSON.parse(body.text) as unknown;
+      const parsed = JSON.parse(body) as unknown;
       if (!isTaskMessage(parsed)) throw new Error('invalid federation task envelope');
       message = parsed;
     } catch (error) {
@@ -105,8 +144,7 @@ export class FederationHttpServer {
 
     const acceptance = await this.state.acceptMessage(message);
     if (!acceptance.accepted) {
-      const status = acceptance.reason === 'invalid-signature' ? 401 : acceptance.reason === 'wrong-recipient' ? 403 : 409;
-      json(response, status, { error: acceptance.reason });
+      json(response, acceptanceStatus(acceptance.reason), { error: acceptance.reason });
       return;
     }
 
@@ -116,42 +154,59 @@ export class FederationHttpServer {
       return;
     }
 
-    const existing = await this.state.findResultForTask(task.id);
+    const existing = await this.state.findResultForTask(task.id, task.leaseId ? task.attempt : undefined);
     const result = existing ?? await this.executeOnce(task);
     const signed = this.registry.sign(this.nodeId, message.from, { kind: 'result' as const, result }, this.secret, this.resultTtlMs);
     json(response, 200, signed);
   }
 
   private async executeOnce(task: FederationTask): Promise<FederationResult> {
-    const active = this.inFlight.get(task.id);
+    const key = task.leaseId ? `${task.id}:${task.leaseId}:${task.attempt}` : `${task.id}:legacy`;
+    const active = this.inFlight.get(key);
     if (active) return active;
-    const promise = this.executeAndPersist(task).finally(() => this.inFlight.delete(task.id));
-    this.inFlight.set(task.id, promise);
+    const promise = this.executeAndPersist(task).finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, promise);
     return promise;
   }
 
   private async executeAndPersist(task: FederationTask): Promise<FederationResult> {
     const imported = await this.state.importTask(task);
-    const existing = await this.state.findResultForTask(imported.id);
+    if (imported.executionId !== task.executionId) throw new Error(`Federation task ${task.id} conflicts with an existing execution`);
+    const leased = Boolean(task.leaseId);
+    const existing = await this.state.findResultForTask(task.id, leased ? task.attempt : undefined);
     if (existing) return existing;
-    await this.state.updateTask(imported.id, { status: 'running', attempt: imported.attempt + 1, assignedNodeId: this.nodeId });
+
+    if (leased) {
+      await this.state.updateTask(task.id, {
+        status: 'running',
+        attempt: task.attempt,
+        assignedNodeId: this.nodeId,
+        leaseId: task.leaseId!,
+      });
+    } else {
+      await this.state.updateTask(task.id, { status: 'running', attempt: imported.attempt + 1, assignedNodeId: this.nodeId });
+    }
+    const executionTask = await this.state.getTask(task.id);
+    if (!executionTask) throw new Error(`Federation task ${task.id} disappeared before execution`);
 
     let outcome: FederationExecutionOutcome;
     try {
-      outcome = await this.executeTask(structuredClone(imported));
+      outcome = await this.executeTask(structuredClone(executionTask));
     } catch (error) {
       outcome = { success: false, error: error instanceof Error ? error.message : String(error) };
     }
 
     const result = await this.state.appendResult({
-      taskId: imported.id,
-      executionId: imported.executionId,
+      taskId: executionTask.id,
+      executionId: executionTask.executionId,
       nodeId: this.nodeId,
+      attempt: executionTask.attempt,
+      ...(executionTask.leaseId ? { leaseId: executionTask.leaseId } : {}),
       success: outcome.success,
       ...(outcome.output !== undefined ? { output: structuredClone(outcome.output) } : {}),
       ...(!outcome.success ? { error: outcome.error ?? 'Federation task failed' } : {}),
     });
-    await this.state.updateTask(imported.id, {
+    await this.state.updateTask(executionTask.id, {
       status: outcome.success ? 'completed' : 'failed',
       ...(!outcome.success ? { error: outcome.error ?? 'Federation task failed' } : {}),
     });
@@ -185,16 +240,58 @@ export class FederationHttpClient {
     this.messageTtlMs = options.messageTtlMs ?? 30_000;
   }
 
+  async sendHeartbeat(input: { endpoint: string; targetNodeId: string; node: FederationNodeHeartbeat }): Promise<FederationHeartbeatAck> {
+    await this.state.init();
+    if (!/^https?:\/\//.test(input.endpoint)) throw new Error('Federation endpoint must use http(s)');
+    if (!input.targetNodeId.trim()) throw new Error('Federation heartbeat targetNodeId is required');
+    if (input.node.id !== this.nodeId) throw new Error('Federation heartbeat node id must match the client nodeId');
+    const envelope = this.registry.sign(this.nodeId, input.targetNodeId, { kind: 'heartbeat' as const, node: structuredClone(input.node) }, this.secret, this.messageTtlMs);
+    const message = await this.postEnvelope(`${input.endpoint.replace(/\/$/, '')}/v1/federation/heartbeat`, envelope, isHeartbeatAckMessage, 'heartbeat acknowledgement');
+    if (message.from !== input.targetNodeId) throw new Error(`Federation heartbeat acknowledgement came from unexpected node: ${message.from}`);
+    const acceptance = await this.state.acceptMessage(message);
+    if (!acceptance.accepted) throw new Error(`Federation heartbeat acknowledgement rejected: ${acceptance.reason}`);
+    if (message.payload.nodeId !== input.targetNodeId || message.payload.acceptedNodeId !== this.nodeId) throw new Error('Federation heartbeat acknowledgement does not match request');
+    return { nodeId: message.payload.nodeId, acceptedNodeId: message.payload.acceptedNodeId };
+  }
+
   async dispatchTask(input: { endpoint: string; task: FederationTask }): Promise<FederationResult> {
     await this.state.init();
     if (!/^https?:\/\//.test(input.endpoint)) throw new Error('Federation endpoint must use http(s)');
     const targetNodeId = input.task.assignedNodeId;
     if (!targetNodeId) throw new Error('Federation task must have assignedNodeId before dispatch');
     const envelope = this.registry.sign(this.nodeId, targetNodeId, { kind: 'task' as const, task: structuredClone(input.task) }, this.secret, this.messageTtlMs);
+    const message = await this.postEnvelope(`${input.endpoint.replace(/\/$/, '')}/v1/federation/task`, envelope, isResultMessage, 'result');
+    if (message.from !== targetNodeId) throw new Error(`Federation response came from unexpected node: ${message.from}`);
+    const acceptance = await this.state.acceptMessage(message);
+    if (!acceptance.accepted) throw new Error(`Federation result rejected: ${acceptance.reason}`);
+    const result = message.payload.result;
+    if (result.taskId !== input.task.id || result.executionId !== input.task.executionId || result.nodeId !== targetNodeId) {
+      throw new Error('Federation result does not match dispatched task');
+    }
+
+    if (input.task.leaseId) {
+      if (result.leaseId !== input.task.leaseId || result.attempt !== input.task.attempt) throw new Error('Federation result fencing token does not match dispatched lease');
+      return this.state.commitLeasedResult(result);
+    }
+
+    const durable = await this.state.importResult(result);
+    await this.state.updateTask(input.task.id, {
+      status: durable.success ? 'completed' : 'failed',
+      ...(durable.success ? {} : { error: durable.error ?? 'Federation task failed' }),
+    });
+    return durable;
+  }
+
+  private async postEnvelope<TMessage extends FederationMessage<unknown>>(
+    url: string,
+    envelope: FederationMessage<unknown>,
+    guard: (value: unknown) => value is TMessage,
+    label: string,
+  ): Promise<TMessage> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const response = await fetch(`${input.endpoint.replace(/\/$/, '')}/v1/federation/task`, {
+      const response = await fetch(url, {
         method: 'POST',
         signal: controller.signal,
         headers: { 'content-type': 'application/json' },
@@ -202,25 +299,13 @@ export class FederationHttpClient {
       });
       const text = await response.text();
       if (!response.ok) throw new Error(`Federation HTTP ${response.status}: ${text}`);
-      let message: FederationMessage<{ kind: 'result'; result: FederationResult }>;
       try {
         const parsed = JSON.parse(text) as unknown;
-        if (!isResultMessage(parsed)) throw new Error('invalid federation result envelope');
-        message = parsed;
+        if (!guard(parsed)) throw new Error(`invalid federation ${label} envelope`);
+        return parsed;
       } catch (error) {
         throw new Error(`Invalid federation response: ${error instanceof Error ? error.message : String(error)}`);
       }
-      if (message.from !== targetNodeId) throw new Error(`Federation response came from unexpected node: ${message.from}`);
-      const acceptance = await this.state.acceptMessage(message);
-      if (!acceptance.accepted) throw new Error(`Federation result rejected: ${acceptance.reason}`);
-      const result = message.payload.result;
-      if (result.taskId !== input.task.id || result.executionId !== input.task.executionId) throw new Error('Federation result does not match dispatched task');
-      const durable = await this.state.importResult(result);
-      await this.state.updateTask(input.task.id, {
-        status: durable.success ? 'completed' : 'failed',
-        ...(durable.success ? {} : { error: durable.error ?? 'Federation task failed' }),
-      });
-      return durable;
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') throw new Error(`Federation HTTP request timed out after ${this.timeoutMs}ms`);
       throw error;
@@ -248,10 +333,26 @@ function json(response: ServerResponse, status: number, value: unknown): void {
   response.end(JSON.stringify(value));
 }
 
+function acceptanceStatus(reason: string): number {
+  return reason === 'invalid-signature' ? 401 : reason === 'wrong-recipient' ? 403 : 409;
+}
+
 function isTaskMessage(value: unknown): value is FederationMessage<{ kind: 'task'; task: FederationTask }> {
   if (!isEnvelope(value)) return false;
   const payload = value.payload;
   return isRecord(payload) && payload.kind === 'task' && isFederationTask(payload.task);
+}
+
+function isHeartbeatMessage(value: unknown): value is FederationMessage<{ kind: 'heartbeat'; node: FederationNodeHeartbeat }> {
+  if (!isEnvelope(value)) return false;
+  const payload = value.payload;
+  return isRecord(payload) && payload.kind === 'heartbeat' && isFederationNodeHeartbeat(payload.node);
+}
+
+function isHeartbeatAckMessage(value: unknown): value is FederationMessage<{ kind: 'heartbeat-ack'; nodeId: string; acceptedNodeId: string }> {
+  if (!isEnvelope(value)) return false;
+  const payload = value.payload;
+  return isRecord(payload) && payload.kind === 'heartbeat-ack' && typeof payload.nodeId === 'string' && typeof payload.acceptedNodeId === 'string';
 }
 
 function isResultMessage(value: unknown): value is FederationMessage<{ kind: 'result'; result: FederationResult }> {
@@ -265,18 +366,27 @@ function isEnvelope(value: unknown): value is FederationMessage<unknown> {
   return ['id', 'from', 'to', 'createdAt', 'expiresAt', 'nonce', 'signature'].every((key) => typeof value[key] === 'string') && 'payload' in value;
 }
 
+function isFederationNodeHeartbeat(value: unknown): value is FederationNodeHeartbeat {
+  if (!isRecord(value)) return false;
+  return typeof value.id === 'string' && typeof value.endpoint === 'string'
+    && Array.isArray(value.capabilities) && value.capabilities.every((item) => typeof item === 'string')
+    && (value.load === undefined || typeof value.load === 'number');
+}
+
 function isFederationTask(value: unknown): value is FederationTask {
   if (!isRecord(value)) return false;
   return typeof value.id === 'string' && typeof value.executionId === 'string' && typeof value.taskType === 'string' && typeof value.goal === 'string'
     && Array.isArray(value.requiredCapabilities) && value.requiredCapabilities.every((item) => typeof item === 'string')
     && isRecord(value.payload) && typeof value.status === 'string' && typeof value.attempt === 'number'
-    && typeof value.createdAt === 'string' && typeof value.updatedAt === 'string';
+    && typeof value.createdAt === 'string' && typeof value.updatedAt === 'string'
+    && (value.leaseId === undefined || typeof value.leaseId === 'string');
 }
 
 function isFederationResult(value: unknown): value is FederationResult {
   if (!isRecord(value)) return false;
   return typeof value.id === 'string' && typeof value.taskId === 'string' && typeof value.executionId === 'string'
-    && typeof value.nodeId === 'string' && typeof value.success === 'boolean' && typeof value.createdAt === 'string';
+    && typeof value.nodeId === 'string' && typeof value.success === 'boolean' && typeof value.createdAt === 'string'
+    && typeof value.attempt === 'number' && (value.leaseId === undefined || typeof value.leaseId === 'string');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
