@@ -6,7 +6,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
   readonly name = 'claude-code';
   private readonly executable: string;
   private readonly runner: BoundedProcessRunner;
-  private readonly environment?: Record<string, string>;
+  private readonly environment: Record<string, string> | undefined;
 
   constructor(options: { executable: string; runner: BoundedProcessRunner; environment?: Record<string, string> }) {
     this.executable = options.executable;
@@ -26,7 +26,7 @@ export class ClaudeCodeAdapter implements CodingAgentAdapter {
   }
 
   async run(request: CodingAgentRequest): Promise<CodingAgentResult> {
-    const result = await this.runner.run({ executable: this.executable, args: this.argumentsFor(request), cwd: request.cwd, environment: this.environment, timeoutMs: request.timeoutMs });
+    const result = await this.runner.run({ executable: this.executable, args: this.argumentsFor(request), cwd: request.cwd, ...(this.environment ? { environment: this.environment } : {}), timeoutMs: request.timeoutMs });
     let structured: Record<string, unknown> | undefined;
     try {
       const parsed = JSON.parse(result.stdout) as unknown;
