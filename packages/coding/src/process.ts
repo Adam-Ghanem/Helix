@@ -44,11 +44,11 @@ export class BoundedProcessRunner {
     this.options = { ...options, killGraceMs: options.killGraceMs ?? 250 };
   }
 
-  run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+  async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
     const executable = assertAbsoluteExecutable(request.executable, this.options.allowedExecutables);
     const cwd = validatePath(request.cwd, this.options.workspaceRoots);
-    if (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0) return Promise.reject(new Error('timeoutMs must be greater than zero'));
-    if (request.signal?.aborted) return Promise.reject(new Error('Process execution cancelled before start'));
+    if (!Number.isFinite(request.timeoutMs) || request.timeoutMs <= 0) throw new Error('timeoutMs must be greater than zero');
+    if (request.signal?.aborted) throw new Error('Process execution cancelled before start');
     const allowedEnvironment = new Set(this.options.environmentKeys);
     const environment = Object.fromEntries(Object.entries(request.environment ?? {}).filter(([key]) => allowedEnvironment.has(key)));
 
