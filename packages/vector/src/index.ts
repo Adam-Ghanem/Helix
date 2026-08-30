@@ -4,7 +4,7 @@ import { dirname } from 'node:path';
 
 export interface EmbeddingProvider {
   readonly name: string;
-  readonly dimensions?: number;
+  readonly dimensions: number | undefined;
   embed(texts: string[]): Promise<number[][]>;
 }
 
