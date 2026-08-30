@@ -87,6 +87,13 @@ export interface FederationLeaseOptions {
   now?: number;
 }
 
+export interface FederationNodeHeartbeat {
+  id: string;
+  endpoint: string;
+  capabilities: string[];
+  load?: number;
+}
+
 export class DurableFederationState {
   private readonly stateFile: string;
   private readonly localNodeId: string;
@@ -148,6 +155,42 @@ export class DurableFederationState {
     this.nodes.set(node.id, normalized);
     await this.persist();
     return clone(normalized);
+  }
+
+  async heartbeatNode(input: FederationNodeHeartbeat, now = Date.now()): Promise<FederationNode> {
+    this.assertInitialized();
+    if (!Number.isFinite(now)) throw new Error('Federation heartbeat time must be finite');
+    validateHeartbeat(input);
+    const existing = this.nodes.get(input.id);
+    const node: FederationNode = {
+      id: input.id,
+      endpoint: input.endpoint,
+      capabilities: [...new Set(input.capabilities)],
+      status: existing?.status === 'quarantined' ? 'quarantined' : 'online',
+      lastHeartbeat: new Date(now).toISOString(),
+      load: normalizeLoad(input.load),
+    };
+    this.nodes.set(node.id, node);
+    await this.persist();
+    return clone(node);
+  }
+
+  async expireStaleNodes(timeoutMs: number, now = Date.now()): Promise<FederationNode[]> {
+    this.assertInitialized();
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('Federation heartbeat timeout must be greater than zero');
+    if (!Number.isFinite(now)) throw new Error('Federation heartbeat time must be finite');
+    const expired: FederationNode[] = [];
+    let changed = false;
+    for (const node of this.nodes.values()) {
+      if (node.status !== 'online') continue;
+      const heartbeat = node.lastHeartbeat ? Date.parse(node.lastHeartbeat) : Number.NaN;
+      if (Number.isFinite(heartbeat) && now - heartbeat <= timeoutMs) continue;
+      node.status = 'offline';
+      expired.push(clone(node));
+      changed = true;
+    }
+    if (changed) await this.persist();
+    return expired;
   }
 
   async listNodes(): Promise<FederationNode[]> {
@@ -427,6 +470,13 @@ function validateNode(node: FederationNode): void {
   if (!node.id.trim()) throw new Error('Federation node id is required');
   if (!/^https?:\/\//.test(node.endpoint)) throw new Error('Federation endpoint must use http(s)');
   if (!Array.isArray(node.capabilities) || node.capabilities.some((capability) => !capability.trim())) throw new Error('Federation capabilities must be non-empty strings');
+}
+
+function validateHeartbeat(input: FederationNodeHeartbeat): void {
+  if (!input.id.trim()) throw new Error('Federation heartbeat node id is required');
+  if (!/^https?:\/\//.test(input.endpoint)) throw new Error('Federation endpoint must use http(s)');
+  if (!Array.isArray(input.capabilities) || input.capabilities.some((capability) => typeof capability !== 'string' || !capability.trim())) throw new Error('Federation capabilities must be non-empty strings');
+  normalizeLoad(input.load);
 }
 
 function validateTask(task: FederationTask): void {
