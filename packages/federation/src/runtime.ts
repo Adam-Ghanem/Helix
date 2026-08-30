@@ -3,7 +3,7 @@ import { DurableFederationState } from './state.js';
 import { FederationRouter } from './router.js';
 
 export interface FederationTaskDispatcher {
-  dispatchTask(input: { endpoint: string; task: FederationTask }): Promise<FederationResult>;
+  dispatchTask(input: { endpoint: string; task: FederationTask; commitLeasedResult?: boolean }): Promise<FederationResult>;
 }
 
 export interface DistributedRuntimeCoordinatorOptions {
@@ -97,7 +97,26 @@ export class DistributedRuntimeCoordinator {
       throw new Error(`Federation task ${task.id} lease state was not persisted`);
     }
 
-    const result = await this.client.dispatchTask({ endpoint: node.endpoint, task: leasedTask });
+    let stopRenewal = false;
+    let renewalError: unknown;
+    const renewal = now === undefined
+      ? this.renewLeaseUntilStopped(lease.id, node.id, () => stopRenewal).catch((error) => { renewalError = error; })
+      : Promise.resolve();
+
+    let result: FederationResult | undefined;
+    let dispatchError: unknown;
+    try {
+      result = await this.client.dispatchTask({ endpoint: node.endpoint, task: leasedTask, commitLeasedResult: false });
+    } catch (error) {
+      dispatchError = error;
+    } finally {
+      stopRenewal = true;
+      await renewal;
+    }
+
+    if (dispatchError !== undefined) throw dispatchError;
+    if (renewalError !== undefined) throw renewalError;
+    if (!result) throw new Error(`Federation task ${task.id} returned no result`);
     return this.state.commitLeasedResult(result, now ?? Date.now());
   }
 
@@ -119,4 +138,17 @@ export class DistributedRuntimeCoordinator {
     const results = await this.runPending(now);
     return { recoveredLeases, results };
   }
+
+  private async renewLeaseUntilStopped(leaseId: string, nodeId: string, shouldStop: () => boolean): Promise<void> {
+    const intervalMs = Math.max(1, Math.floor(this.leaseMs / 3));
+    while (!shouldStop()) {
+      await delay(intervalMs);
+      if (shouldStop()) return;
+      await this.state.heartbeatLease(leaseId, nodeId, { leaseMs: this.leaseMs });
+    }
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
