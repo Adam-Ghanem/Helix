@@ -35,6 +35,7 @@ export interface RuntimeReplanner {
 export class DeterministicFailureReplanner implements RuntimeReplanner {
   async replan(context: ReplanContext): Promise<ReplanProposal | null> {
     if (context.remainingTaskCapacity < 1) return null;
+    if (context.failedTask.dependencies.length === 0) return null;
     return {
       reason: `Repair failed task ${context.failedTask.title}`,
       replacements: [{
