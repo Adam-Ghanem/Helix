@@ -1,10 +1,49 @@
-import { TaskId, TaskRecord, TaskStatus, id } from '../../core/src/index.js';
+import { ExecutionRecord, TaskId, TaskRecord, TaskStatus, id } from '../../core/src/index.js';
 
 export interface TaskSpec {
   title: string;
   description: string;
   dependencies?: TaskId[];
   estimatedMs?: number;
+}
+
+export type ReplacementTaskSpec = Omit<TaskSpec, 'dependencies'>;
+
+export interface TaskSupersession {
+  superseded: TaskRecord;
+  replacements: TaskRecord[];
+}
+
+export interface ReplanProposal {
+  reason: string;
+  replacements: ReplacementTaskSpec[];
+}
+
+export interface ReplanContext {
+  execution: ExecutionRecord;
+  failedTask: TaskRecord;
+  tasks: TaskRecord[];
+  revision: number;
+  remainingTaskCapacity: number;
+  failureReason: string;
+}
+
+export interface RuntimeReplanner {
+  replan(context: ReplanContext): Promise<ReplanProposal | null>;
+}
+
+export class DeterministicFailureReplanner implements RuntimeReplanner {
+  async replan(context: ReplanContext): Promise<ReplanProposal | null> {
+    if (context.remainingTaskCapacity < 1) return null;
+    if (context.failedTask.dependencies.length === 0) return null;
+    return {
+      reason: `Repair failed task ${context.failedTask.title}`,
+      replacements: [{
+        title: `Repair ${context.failedTask.title}`,
+        description: `Recover the failed task without repeating completed work. Previous failure: ${context.failureReason}`,
+      }],
+    };
+  }
 }
 
 export class TaskGraph {
@@ -49,6 +88,57 @@ export class TaskGraph {
     }
     this.tasks.delete(taskId);
     this.estimates.delete(taskId);
+  }
+
+  supersedeFailed(taskId: TaskId, replacements: ReplacementTaskSpec[], executionId: string): TaskSupersession {
+    const taskSnapshot = new Map<TaskId, TaskRecord>([...this.tasks.entries()].map(([key, task]) => [key, structuredClone(task)]));
+    const estimateSnapshot = new Map(this.estimates);
+    try {
+      const failed = this.require(taskId);
+      if (failed.status !== 'failed') throw new Error(`Task ${taskId} must be failed before it can be superseded`);
+      if (!replacements.length) throw new Error('Task supersession requires at least one replacement');
+      if (failed.executionId !== executionId) throw new Error(`Task ${taskId} does not belong to execution ${executionId}`);
+
+      const originalDependencies = [...failed.dependencies];
+      const downstream = [...this.tasks.values()].filter((task) => task.id !== taskId && task.status !== 'completed' && task.dependencies.includes(taskId));
+      const created: TaskRecord[] = [];
+      let previousTaskId: TaskId | undefined;
+
+      for (const replacement of replacements) {
+        if (!replacement.title.trim()) throw new Error('Replacement task title is required');
+        if (!replacement.description.trim()) throw new Error('Replacement task description is required');
+        if (replacement.estimatedMs !== undefined && (!Number.isFinite(replacement.estimatedMs) || replacement.estimatedMs <= 0)) throw new Error('Replacement task estimatedMs must be greater than zero');
+        const dependencies = previousTaskId ? [previousTaskId] : originalDependencies;
+        const createdTask: TaskRecord = {
+          id: id('task'),
+          executionId,
+          title: replacement.title,
+          description: replacement.description,
+          dependencies: [...dependencies],
+          status: dependencies.length ? 'pending' : 'ready',
+          attempts: 0,
+        };
+        this.tasks.set(createdTask.id, createdTask);
+        this.estimates.set(createdTask.id, replacement.estimatedMs ?? 1_000);
+        created.push(createdTask);
+        previousTaskId = createdTask.id;
+      }
+
+      const finalReplacementId = previousTaskId!;
+      for (const dependent of downstream) {
+        dependent.dependencies = dependent.dependencies.map((dependency) => dependency === taskId ? finalReplacementId : dependency);
+      }
+      failed.status = 'skipped';
+      this.refreshReadiness();
+      this.validate();
+      return { superseded: structuredClone(failed), replacements: created.map((task) => structuredClone(task)) };
+    } catch (error) {
+      this.tasks.clear();
+      for (const [key, task] of taskSnapshot) this.tasks.set(key, task);
+      this.estimates.clear();
+      for (const [key, estimate] of estimateSnapshot) this.estimates.set(key, estimate);
+      throw error;
+    }
   }
 
   setStatus(taskId: TaskId, status: TaskStatus): void {
