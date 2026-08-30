@@ -53,7 +53,7 @@ test('MCP Streamable HTTP listen resolves on ack, filters notifications, and clo
   try {
     const subscription = await client.listen(
       { resourcesListChanged: true, resourceSubscriptions: ['memory://one'] },
-      (event) => events.push(event),
+      (event) => { events.push(event); },
     );
     assert.deepEqual(subscription.honoredFilter, { resourcesListChanged: true, resourceSubscriptions: ['memory://one'] });
     assert.equal(await subscription.closed, 'graceful');
