@@ -199,7 +199,7 @@ export class DurableLearningEngine {
         prunedPatterns += 1;
       }
     }
-    const surviving = new Set(this.patterns.values().map((pattern) => pattern.key));
+    const surviving = new Set([...this.patterns.values()].map((pattern) => pattern.key));
     for (const [taskType, strategy] of this.strategies) {
       strategy.preferredPatterns = strategy.preferredPatterns.filter((key) => surviving.has(key));
       strategy.avoidPatterns = strategy.avoidPatterns.filter((key) => surviving.has(key));
