@@ -5,12 +5,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BubblewrapSandbox, SandboxManager, UnsafeProcessSandbox } from '../packages/sandbox/src/index.js';
 
-test('bubblewrap sandbox builds a read-only no-network plan with bounded resources and env allowlist', () => {
+test('bubblewrap sandbox builds a minimal read-only no-network plan with bounded resources and env allowlist', () => {
   const workspace = '/work/project';
   const sandbox = new BubblewrapSandbox({
     workspace,
     bwrapExecutable: '/usr/bin/bwrap',
     prlimitExecutable: '/usr/bin/prlimit',
+    runtimeReadOnlyPaths: ['/usr', '/lib'],
     allowedCommands: ['/usr/bin/node'],
     allowedEnvironmentKeys: ['SAFE_TOKEN'],
     timeoutMs: 5000,
@@ -32,7 +33,10 @@ test('bubblewrap sandbox builds a read-only no-network plan with bounded resourc
   assert.deepEqual(bwrapArgs.slice(0, 2), ['--die-with-parent', '--new-session']);
   assert.ok(bwrapArgs.includes('--unshare-net'));
   assert.ok(bwrapArgs.includes('--ro-bind'));
-  assert.ok(bwrapArgs.includes('/'));
+  assert.ok(bwrapArgs.includes('/usr'));
+  assert.ok(bwrapArgs.includes('/lib'));
+  assert.equal(bwrapArgs.includes('/home'), false);
+  assert.equal(bwrapArgs.includes('/root'), false);
   assert.ok(bwrapArgs.includes('--bind'));
   assert.ok(bwrapArgs.includes(workspace));
   assert.ok(bwrapArgs.includes('/workspace'));
