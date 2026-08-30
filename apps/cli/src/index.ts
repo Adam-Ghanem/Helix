@@ -1,7 +1,11 @@
 #!/usr/bin/env node
-import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+import { dirname, extname, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
+import { daemonPaths, enqueueExecution, readDaemonStatus, requestDaemonStop } from '../../../packages/daemon/src/index.js';
 import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
+import { DurableTaskQueue } from '../../../packages/workers/src/index.js';
 
 const args = process.argv.slice(2);
 const jsonOutput = args.includes('--json');
@@ -18,16 +22,26 @@ function print(value: unknown): void {
 }
 
 function help(): void {
-  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
+  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--background] [--json]\n  helix daemon <start|status|stop> [--json]\n  helix jobs [--json]\n  helix job <id> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
 }
 
 async function main(): Promise<void> {
-  await runtime.init();
   const command = args[0];
   if (!command || command === '--help' || command === 'help') return help();
+
+  if (command === 'daemon') return handleDaemonCommand();
+  if (command === 'jobs' || command === 'job') return handleJobCommand(command);
+
+  await runtime.init();
   if (command === 'run') {
-    const goal = args.filter((arg, index) => index > 0 && arg !== '--json').join(' ').trim();
+    const background = args.includes('--background');
+    const goal = args.filter((arg, index) => index > 0 && arg !== '--json' && arg !== '--background').join(' ').trim();
     if (!goal) throw new Error('A goal is required. Example: helix run "Analyze this repository"');
+    if (background) {
+      const job = await enqueueExecution(dataDirectory, { goal });
+      const daemon = await readDaemonStatus(dataDirectory);
+      return print({ job, daemonRunning: daemon?.running ?? false });
+    }
     const execution = await runtime.execute({ goal });
     if (jsonOutput) return print(execution);
     console.log('HELIX');
@@ -71,6 +85,63 @@ async function main(): Promise<void> {
     return print({ agents: count, executionId: execution.id, status: execution.status, elapsedMs: Math.round(performance.now() - started), tasks: execution.usage.tasks });
   }
   throw new Error(`Unknown command: ${command}`);
+}
+
+async function handleDaemonCommand(): Promise<void> {
+  const action = args[1] ?? 'status';
+  if (!['start', 'status', 'stop'].includes(action)) throw new Error('Usage: helix daemon <start|status|stop>');
+  if (action === 'status') {
+    const status = await readDaemonStatus(dataDirectory);
+    return print(status ?? { running: false, dataDirectory });
+  }
+  if (action === 'stop') {
+    const requested = await requestDaemonStop(dataDirectory);
+    if (!requested) return print({ running: false, stopped: false, reason: 'daemon is not running' });
+    const stopped = await waitForDaemon(false);
+    return print({ running: !stopped, stopped });
+  }
+
+  const existing = await readDaemonStatus(dataDirectory);
+  if (existing?.running) return print(existing);
+  const entrypoint = daemonEntrypoint();
+  const child = spawn(process.execPath, [...process.execArgv, entrypoint], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, HELIX_DATA_DIR: dataDirectory },
+  });
+  child.unref();
+  const started = await waitForDaemon(true);
+  if (!started) throw new Error('Helix daemon did not report a healthy startup');
+  return print(await readDaemonStatus(dataDirectory));
+}
+
+async function handleJobCommand(command: 'jobs' | 'job'): Promise<void> {
+  const queue = new DurableTaskQueue({ stateFile: daemonPaths(dataDirectory).queueFile });
+  await queue.init();
+  if (command === 'jobs') return print({ jobs: await queue.list() });
+  const jobId = args[1];
+  if (!jobId) throw new Error('Usage: helix job <id>');
+  return print(await queue.get(jobId));
+}
+
+function daemonEntrypoint(): string {
+  const cliPath = fileURLToPath(import.meta.url);
+  const extension = extname(cliPath);
+  if (extension !== '.ts' && extension !== '.js') throw new Error(`Unsupported CLI module extension: ${extension}`);
+  return resolve(dirname(cliPath), '../../daemon/src', `index${extension}`);
+}
+
+async function waitForDaemon(expectedRunning: boolean): Promise<boolean> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const status = await readDaemonStatus(dataDirectory);
+    if ((status?.running ?? false) === expectedRunning) return true;
+    await sleep(50);
+  }
+  return false;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 main().catch((error: unknown) => {
