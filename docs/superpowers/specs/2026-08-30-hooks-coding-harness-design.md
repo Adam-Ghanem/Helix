@@ -17,13 +17,14 @@ Ruflo demonstrates the value of lifecycle hooks such as pre-task, post-task, pre
 ## Design Principles
 
 1. **Provider-neutral core.** Helix owns orchestration state and lifecycle semantics. Codex, Claude Code, and future coding agents are adapters.
-2. **Default-deny execution.** Hooks may enrich, route, annotate, or block. They must not silently bypass Helix policy decisions.
+2. **Default-deny for Helix-controlled execution.** Hooks may enrich, route, annotate, or block. They must not silently bypass Helix policy decisions.
 3. **Durable sessions.** Coding sessions, hook outcomes, artifacts, quality gates, and adapter executions survive process restart.
 4. **Structured evidence.** Review/test/judge outputs are typed records, not opaque prose where avoidable.
 5. **Fail closed for security gates, fail open only for optional telemetry/learning hooks.**
 6. **TDD for production behavior.** Every behavior is introduced by a failing test before implementation.
 7. **No vendor-specific assumptions in core packages.** Vendor flags, JSON formats, process invocation, and session identifiers live in adapter files.
 8. **No unrestricted shell execution.** Adapter process spawning is bounded by executable allowlists, cwd validation, environment allowlists, timeout, output limits, and cancellation.
+9. **Honest enforcement boundary.** Helix can pre-authorize operations it directly executes. Operations performed internally by an external coding CLI are governed by that CLI's permission model and can only be treated as Helix evidence unless the vendor exposes an interception surface that Helix explicitly integrates.
 
 ## Scope
 
@@ -44,11 +45,11 @@ Ruflo demonstrates the value of lifecycle hooks such as pre-task, post-task, pre
   - `on-failure`
   - `pre-review`
   - `post-review`
-- Hook priorities, filters, timeout, blocking decisions, annotations, emitted evidence, and failure policy.
+- Hook priorities, filters, timeout, blocking decisions, annotations, emitted evidence, audit hooks, and failure policy.
 - Durable coding session store.
 - Coding-agent adapter interface.
 - Process-based adapter runner with strict safety controls.
-- Claude Code adapter using non-interactive structured output.
+- Claude Code adapter using documented non-interactive structured output.
 - Generic process adapter suitable for Codex CLI or another local coding agent without coupling the core to unstable vendor-specific flags.
 - Orchestrated coding workflow:
   - task intake
@@ -70,6 +71,7 @@ Ruflo demonstrates the value of lifecycle hooks such as pre-task, post-task, pre
 - Automatic git commit/push/merge.
 - Direct GitHub PR creation from the coding harness.
 - Neural training or LoRA-style model updates.
+- Pretending Helix can intercept every command/edit performed inside an external coding CLI when that CLI exposes no such interception API.
 - A vendor-specific Codex implementation that depends on undocumented flags. The generic adapter contract must be ready for a dedicated Codex adapter once its invocation contract is verified.
 
 ## Architecture
@@ -149,6 +151,7 @@ export interface HookDefinition {
   events: HookEventName[];
   priority: number;
   critical: boolean;
+  alwaysRun?: boolean;
   timeoutMs: number;
   matcher?: (context: HookContext) => boolean;
   handler: (context: HookContext) => Promise<HookResult>;
@@ -159,8 +162,8 @@ Rules:
 
 - Lower numeric `priority` executes first.
 - Equal priorities preserve registration order.
-- A `block` result stops later non-audit hooks for that event.
-- Audit hooks marked `alwaysRun: true` may still record the blocked attempt, but cannot change the final block decision.
+- A `block` result stops later hooks for that event except hooks explicitly marked `alwaysRun: true`.
+- An `alwaysRun` hook may record/audit the blocked attempt but cannot change an existing block decision to continue.
 - A timeout/error from a `critical` hook blocks the operation.
 - A timeout/error from a non-critical hook emits a warning and continues.
 - Hook results are durable through the coding session store and optionally mirrored into Helix EventStore.
@@ -180,20 +183,24 @@ Runs on `pre-task`:
 
 ### `CommandSafetyHook`
 
-Runs on `pre-command` and is critical:
+Runs on `pre-command` and is critical for commands Helix directly controls:
 
 - validates command shape;
 - rejects explicitly denied command patterns;
 - delegates final authorization to the existing Helix policy/sandbox boundary;
 - records the reason for allow/block.
 
+It does not claim to pre-authorize commands that an external coding CLI executes internally. Such commands can be recorded later as adapter evidence, and the adapter must use the strongest safe vendor permission mode available without bypassing permissions.
+
 ### `EditContextHook`
 
-Runs on `pre-edit`:
+Runs on `pre-edit` for edits Helix directly controls:
 
 - validates the file is inside allowed workspace roots;
 - recalls file/task-related memory;
 - attaches known evidence and previous failures.
+
+Vendor-internal edits reported after an adapter run are recorded through `post-edit` evidence but are not retroactively described as pre-authorized by Helix.
 
 ### `OutcomeLearningHook`
 
@@ -280,7 +287,11 @@ export interface CodingAgentResult {
   structured?: Record<string, unknown>;
   sessionRef?: string;
   changedFiles: string[];
-  commands: Array<{ command: string; exitCode?: number }>;
+  commands: Array<{
+    command: string;
+    exitCode?: number;
+    authorization: 'helix-authorized' | 'vendor-controlled' | 'unknown';
+  }>;
   usage?: { tokens?: number; costUsd?: number };
   error?: string;
 }
@@ -297,7 +308,7 @@ The harness may select an adapter explicitly or through an adapter registry. Ada
 
 ## Process Adapter Safety
 
-A shared `BoundedProcessRunner` is the only component allowed to spawn external coding CLIs.
+A shared `BoundedProcessRunner` is the only component in the coding package allowed to spawn external coding CLIs.
 
 Required controls:
 
@@ -312,11 +323,15 @@ Required controls:
 - no implicit permission bypass flags;
 - result includes exit code and truncated-output metadata when limits are reached.
 
+These controls govern launching the external CLI process. They do not automatically intercept child operations performed by that CLI unless the adapter integrates an explicit vendor interception surface.
+
 ## Adapter Strategy
 
 ### Claude Code Adapter
 
 Claude Code has a documented non-interactive mode and structured output options. The adapter may use those documented surfaces to execute a bounded prompt and normalize output. The Helix adapter must not enable dangerous permission bypass flags automatically.
+
+Where Claude Code's own permission controls support restricting tools, the adapter may translate `allowedTools` / `deniedTools` into documented permission flags. That is vendor permission enforcement, not a claim that Helix independently intercepted every internal operation.
 
 ### Generic CLI Adapter
 
@@ -341,11 +356,11 @@ The generic adapter is the initial path for Codex-style integration until a dedi
 4. If blocked, persist block evidence and stop.
 5. Recall hybrid memory and attach the top relevant evidence to the adapter context.
 6. Select/spawn implementation agent(s) using the autonomous agent system.
-7. Run implementation adapter.
+7. Run implementation adapter through `BoundedProcessRunner`.
 8. Normalize changed files and commands into evidence records.
-9. Fire corresponding `post-edit` / `post-command` hooks for reported operations.
+9. For operations Helix directly controlled, run the corresponding pre/post hooks around execution. For vendor-internal operations only reported by the adapter, run post hooks as evidence processing and mark authorization as `vendor-controlled` or `unknown`.
 10. Run reviewer stage using a reviewer agent/provider request.
-11. Run tester stage using configured verification commands through the bounded process/sandbox boundary.
+11. Run tester stage using configured verification commands through the Helix-controlled bounded process/sandbox boundary, including `pre-command` and `post-command` hooks.
 12. Run judge stage using review + test evidence.
 13. Fire `post-review` and `post-task`.
 14. Persist outcome to memory/learning.
@@ -400,7 +415,8 @@ Default acceptance policy:
 - reviewer must not contain unresolved `critical` or `high` findings;
 - tester must pass all required commands;
 - judge must return `accepted: true` with confidence >= `0.60`;
-- any critical hook block overrides judge acceptance.
+- any critical hook block overrides judge acceptance;
+- vendor-reported operation evidence alone never satisfies the Helix-controlled test gate.
 
 ## CLI Surface
 
@@ -425,7 +441,7 @@ helix hooks run <event> --session <id> [--payload <json>] [--json]
 - Optional hook timeout/error: warning evidence, continue.
 - Invalid workspace path: block before spawning any process.
 - Adapter unavailable: fail before session enters implementation stage.
-- Adapter malformed structured output: preserve raw output, mark adapter result failed.
+- Adapter malformed structured output: preserve bounded raw output, mark adapter result failed.
 - Reviewer/tester/judge failure: session fails or rejects; never silently marks accepted.
 - Persistence write failure: fail closed for session-state transitions.
 - Learning/memory update failure after final verdict: record warning; do not rewrite a verified accepted verdict.
@@ -433,14 +449,15 @@ helix hooks run <event> --session <id> [--payload <json>] [--json]
 ## Security Requirements
 
 - No `shell: true` process spawning.
-- No automatic `--dangerously-skip-permissions`-style option.
+- No automatic permission-bypass option.
 - All file paths normalized and constrained to workspace roots.
 - Secret values never copied into durable hook/evidence payloads.
 - Hook annotations pass through a sanitizer before persistence.
 - External adapter stderr/stdout are bounded before persistence.
 - Command hooks run before command execution whenever Helix itself controls the process.
 - Vendor-reported commands are evidence only; they are not treated as proof that Helix authorized them.
-- Final acceptance is impossible without durable test evidence.
+- Adapter configuration must explicitly label whether a reported operation is `helix-authorized`, `vendor-controlled`, or `unknown`.
+- Final acceptance is impossible without durable Helix-controlled test evidence.
 
 ## Testing Strategy
 
@@ -450,7 +467,8 @@ helix hooks run <event> --session <id> [--payload <json>] [--json]
 - match filtering;
 - critical failure blocks;
 - optional failure warns and continues;
-- block short-circuits non-audit hooks;
+- block short-circuits ordinary hooks while `alwaysRun` audit hooks still execute;
+- an `alwaysRun` hook cannot reverse a block;
 - timeout behavior;
 - sanitized durable result records.
 
@@ -480,7 +498,8 @@ helix hooks run <event> --session <id> [--payload <json>] [--json]
 - structured success normalization;
 - malformed JSON fallback/failure;
 - non-zero exit result;
-- session resume where supported.
+- session resume where supported;
+- vendor-internal reported commands are labeled `vendor-controlled` or `unknown`, never `helix-authorized` by default.
 
 ### Harness integration tests
 
@@ -491,7 +510,8 @@ helix hooks run <event> --session <id> [--payload <json>] [--json]
 - failing tests prevent acceptance;
 - judge rejection prevents acceptance;
 - restart/resume preserves prior evidence;
-- memory is recalled before adapter execution and outcome stored after completion.
+- memory is recalled before adapter execution and outcome stored after completion;
+- vendor-reported commands do not satisfy the required Helix-controlled verification gate.
 
 No test may require a real paid coding-agent account. Vendor adapter tests use deterministic fixture processes; an optional smoke test can be documented separately for local users.
 
@@ -527,3 +547,4 @@ The tranche is complete only when:
 6. CLI commands expose run/resume/session/hooks functionality.
 7. `pnpm typecheck`, `pnpm build`, and `pnpm test` pass on the feature branch and again on `main` after merge.
 8. Documentation makes no claim that OS/container isolation exists unless that separate sandbox tranche has actually implemented it.
+9. Documentation does not claim Helix pre-authorized vendor-internal operations unless an explicit interception integration exists and is tested.
