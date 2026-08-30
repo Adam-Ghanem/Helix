@@ -154,42 +154,59 @@ export class FederationHttpServer {
       return;
     }
 
-    const existing = await this.state.findResultForTask(task.id);
+    const existing = await this.state.findResultForTask(task.id, task.leaseId ? task.attempt : undefined);
     const result = existing ?? await this.executeOnce(task);
     const signed = this.registry.sign(this.nodeId, message.from, { kind: 'result' as const, result }, this.secret, this.resultTtlMs);
     json(response, 200, signed);
   }
 
   private async executeOnce(task: FederationTask): Promise<FederationResult> {
-    const active = this.inFlight.get(task.id);
+    const key = task.leaseId ? `${task.id}:${task.leaseId}:${task.attempt}` : `${task.id}:legacy`;
+    const active = this.inFlight.get(key);
     if (active) return active;
-    const promise = this.executeAndPersist(task).finally(() => this.inFlight.delete(task.id));
-    this.inFlight.set(task.id, promise);
+    const promise = this.executeAndPersist(task).finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, promise);
     return promise;
   }
 
   private async executeAndPersist(task: FederationTask): Promise<FederationResult> {
     const imported = await this.state.importTask(task);
-    const existing = await this.state.findResultForTask(imported.id);
+    if (imported.executionId !== task.executionId) throw new Error(`Federation task ${task.id} conflicts with an existing execution`);
+    const leased = Boolean(task.leaseId);
+    const existing = await this.state.findResultForTask(task.id, leased ? task.attempt : undefined);
     if (existing) return existing;
-    await this.state.updateTask(imported.id, { status: 'running', attempt: imported.attempt + 1, assignedNodeId: this.nodeId });
+
+    if (leased) {
+      await this.state.updateTask(task.id, {
+        status: 'running',
+        attempt: task.attempt,
+        assignedNodeId: this.nodeId,
+        leaseId: task.leaseId!,
+      });
+    } else {
+      await this.state.updateTask(task.id, { status: 'running', attempt: imported.attempt + 1, assignedNodeId: this.nodeId });
+    }
+    const executionTask = await this.state.getTask(task.id);
+    if (!executionTask) throw new Error(`Federation task ${task.id} disappeared before execution`);
 
     let outcome: FederationExecutionOutcome;
     try {
-      outcome = await this.executeTask(structuredClone(imported));
+      outcome = await this.executeTask(structuredClone(executionTask));
     } catch (error) {
       outcome = { success: false, error: error instanceof Error ? error.message : String(error) };
     }
 
     const result = await this.state.appendResult({
-      taskId: imported.id,
-      executionId: imported.executionId,
+      taskId: executionTask.id,
+      executionId: executionTask.executionId,
       nodeId: this.nodeId,
+      attempt: executionTask.attempt,
+      ...(executionTask.leaseId ? { leaseId: executionTask.leaseId } : {}),
       success: outcome.success,
       ...(outcome.output !== undefined ? { output: structuredClone(outcome.output) } : {}),
       ...(!outcome.success ? { error: outcome.error ?? 'Federation task failed' } : {}),
     });
-    await this.state.updateTask(imported.id, {
+    await this.state.updateTask(executionTask.id, {
       status: outcome.success ? 'completed' : 'failed',
       ...(!outcome.success ? { error: outcome.error ?? 'Federation task failed' } : {}),
     });
@@ -248,7 +265,15 @@ export class FederationHttpClient {
     const acceptance = await this.state.acceptMessage(message);
     if (!acceptance.accepted) throw new Error(`Federation result rejected: ${acceptance.reason}`);
     const result = message.payload.result;
-    if (result.taskId !== input.task.id || result.executionId !== input.task.executionId) throw new Error('Federation result does not match dispatched task');
+    if (result.taskId !== input.task.id || result.executionId !== input.task.executionId || result.nodeId !== targetNodeId) {
+      throw new Error('Federation result does not match dispatched task');
+    }
+
+    if (input.task.leaseId) {
+      if (result.leaseId !== input.task.leaseId || result.attempt !== input.task.attempt) throw new Error('Federation result fencing token does not match dispatched lease');
+      return this.state.commitLeasedResult(result);
+    }
+
     const durable = await this.state.importResult(result);
     await this.state.updateTask(input.task.id, {
       status: durable.success ? 'completed' : 'failed',
@@ -353,7 +378,8 @@ function isFederationTask(value: unknown): value is FederationTask {
   return typeof value.id === 'string' && typeof value.executionId === 'string' && typeof value.taskType === 'string' && typeof value.goal === 'string'
     && Array.isArray(value.requiredCapabilities) && value.requiredCapabilities.every((item) => typeof item === 'string')
     && isRecord(value.payload) && typeof value.status === 'string' && typeof value.attempt === 'number'
-    && typeof value.createdAt === 'string' && typeof value.updatedAt === 'string';
+    && typeof value.createdAt === 'string' && typeof value.updatedAt === 'string'
+    && (value.leaseId === undefined || typeof value.leaseId === 'string');
 }
 
 function isFederationResult(value: unknown): value is FederationResult {
