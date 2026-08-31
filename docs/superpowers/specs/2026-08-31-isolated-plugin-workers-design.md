@@ -16,7 +16,7 @@ This phase adds a real artifact boundary, content-addressed artifact storage, st
 4. Plugin artifacts are single bundled ESM files in v1. Directories, symlinks, devices, sockets, FIFOs, and multi-file packages are rejected.
 5. Installation verifies SHA-256 over the exact artifact bytes and stores those bytes under a content-addressed managed artifact path. The manifest `artifactDigest` must match those bytes.
 6. Worker startup re-verifies managed artifact bytes before execution. Durable manifest verification alone is insufficient.
-7. The plugin artifact is mounted/read from a read-only managed location. Worker scratch state is separate and writable only inside a plugin-specific workspace.
+7. The plugin artifact is mounted into the sandbox read-only at a fixed `/plugin/worker.mjs` target. Worker scratch state is separate and writable only inside a plugin-specific `/workspace`.
 8. Network is disabled by default. It may be enabled only when the manifest requests `network:egress` and installation policy explicitly permits that permission.
 9. The worker receives an empty/allowlisted environment. Host secrets and arbitrary process environment variables are never inherited.
 10. RPC input/output is JSON only, size bounded, timeout bounded, schema checked, and request-ID correlated. Malformed output fails closed and terminates the worker session.
@@ -114,7 +114,7 @@ Protocol limits:
 
 The plugin bundle owns its own stdin/stdout loop and exports no code into Helix. To keep v1 small and auditable, Helix does not inject an SDK runtime into the plugin process. The bundle must speak the JSONL protocol directly.
 
-The worker command is the configured absolute Node executable plus the managed artifact path as its sole script argument. No shell is used.
+The worker command is the configured absolute Node executable plus `/plugin/worker.mjs` as its sole script argument. No shell is used. The coordinator never passes the host artifact path as the script argument.
 
 ## Sandbox integration
 
@@ -125,9 +125,12 @@ The worker command is the configured absolute Node executable plus the managed a
 - no unsafe fallback;
 - network derived from approved `network:egress` permission;
 - bounded timeout/output/process/memory limits;
-- allowlisted environment containing only protocol metadata explicitly set by Helix.
+- allowlisted environment containing only protocol metadata explicitly set by Helix;
+- one explicit read-only bind mapping the verified managed artifact file to `/plugin/worker.mjs`.
 
 The sandbox must report `isolated === true`; otherwise worker creation fails before process launch.
+
+The sandbox API gains `readOnlyBinds?: Array<{ source: string; target: string }>` on strict Bubblewrap options. Each source must be an absolute regular file or directory explicitly supplied by the trusted host, and each target must be an absolute sandbox path outside `/workspace`, `/home`, `/proc`, `/dev`, and `/tmp`. Bubblewrap plans emit `--ro-bind <source> <target>` for these mappings. The plugin worker uses only the verified artifact file mapping; arbitrary plugin-controlled bind requests do not exist.
 
 Because the existing `ExecutableSandbox.executeRequest()` is one-shot, persistent workers require a focused extension: `spawnSession(request)` returns an isolated child-session abstraction with bounded stdin/stdout framing, cancellation, and close/kill semantics. The existing one-shot API remains backward compatible.
 
@@ -205,6 +208,7 @@ TDD coverage must include:
 - symlink/non-regular artifact rejection;
 - content-addressed atomic install and existing-blob re-verification;
 - restart rejection after managed artifact tampering;
+- sandbox read-only bind validation and plan generation;
 - sandbox session refuses `isolated=false`;
 - worker handshake success, timeout, malformed JSON, mismatched request ID, oversized frame;
 - tool and hook RPC proxy execution;
