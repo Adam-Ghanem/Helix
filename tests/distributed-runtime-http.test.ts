@@ -17,7 +17,9 @@ test('distributed coordinator renews the authoritative lease during a long HTTP 
     state: workerState,
     execute: async () => {
       executions += 1;
-      await new Promise((resolve) => setTimeout(resolve, 120));
+      // Keep execution well beyond one lease while leaving enough scheduling
+      // headroom for heavily contended CI runners. Without renewal this still expires.
+      await new Promise((resolve) => setTimeout(resolve, 360));
       return { success: true, output: { longRunning: true } };
     },
   });
@@ -29,7 +31,7 @@ test('distributed coordinator renews the authoritative lease during a long HTTP 
     const coordinator = new DistributedRuntimeCoordinator({
       state: originState,
       client,
-      leaseMs: 40,
+      leaseMs: 120,
       heartbeatTimeoutMs: 1_000,
       maxAttempts: 2,
     });
