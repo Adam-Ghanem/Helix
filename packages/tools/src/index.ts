@@ -35,6 +35,10 @@ export class ToolRegistry {
     return structuredClone({ ...definition, handler: undefined });
   }
 
+  unregister(name: string): boolean {
+    return this.tools.delete(name);
+  }
+
   list(): PublicToolDefinition[] {
     return [...this.tools.values()].map((tool) => structuredClone({ ...tool, handler: undefined }));
   }
