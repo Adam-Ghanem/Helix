@@ -33,7 +33,7 @@ export class HighAvailabilityDistributedCoordinator {
   private readonly taskLeaseMs: number;
   private readonly heartbeatTimeoutMs: number;
   private readonly maxAttempts: number;
-  private leader?: FederationLeaderLease;
+  private leader: FederationLeaderLease | undefined;
   private initialized = false;
 
   constructor(options: HighAvailabilityDistributedCoordinatorOptions) {
