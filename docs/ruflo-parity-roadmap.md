@@ -4,17 +4,17 @@ Helix is targeting the same broad class of autonomous orchestration capability a
 
 | Capability area | Helix current state | Next engineering step |
 |---|---|---|
-| CLI and SDK | Run, lifecycle, approvals, memory, telemetry, JSON output, TypeScript client | Add project initialization, plugin discovery commands, shell completion, and versioned SDK packages |
+| CLI and SDK | Run, lifecycle, approvals, memory, telemetry, JSON output, TypeScript client, and durable plugin list/inspect/install/enable/disable/remove commands | Add project initialization, shell completion, versioned SDK packages, and a dedicated plugin SDK |
 | Durable execution | Ordered idempotent event log, replay, snapshots, lifecycle, retry, recovery | Add multi-process storage adapter, leases persisted across daemon restarts, and migration compatibility |
 | Routing and agents | Catalog, health, reputation, adaptive scoring, configurable strategies, model capability registry, persistent routing evidence | Add explicit exploration policies and evidence-informed score adaptation |
 | Swarms and consensus | Topology planner, assignment coordinator, majority/weighted/confidence consensus, workflows | Add debate rounds, supervisor policies, dynamic replanning, and durable swarm state |
 | Memory and knowledge | Access-controlled structured memory, provenance, search, graph entities and relations | Add embedding/vector adapter, graph query indexes, consolidation jobs, and retention policies |
-| Tools and MCP | Schema validation, risk classification, policy boundary, MCP manifest import | Add reviewed transports, sandbox backends, plugin permission enforcement at runtime, and end-to-end isolation tests |
-| Security and approvals | Default deny, high-risk denial, approval records, API bearer auth, request bounds, rate limits, RBAC/path/executable guards, in-process secret-vault primitive, governed plugin manifests | Add external secret-provider integration, signed plugins, and security release gates |
+| Tools and MCP | Schema validation, risk classification, policy boundary, MCP manifest import, namespaced managed-plugin contributions, and runtime enable/disable cleanup | Add isolated executable plugin workers with end-to-end artifact verification and isolation tests |
+| Security and approvals | Default deny, high-risk denial, approval records, API bearer auth, request bounds, rate limits, RBAC/path/executable guards, in-process secret-vault primitive, Ed25519-signed managed manifests, explicit signer trust/policy, runtime shape validation, and atomic durable plugin lifecycle state | Add external secret-provider integration, sandboxed plugin worker execution bound to signed artifact digests, and security release gates |
 | Observability | Correlated spans, metrics, logs, runtime telemetry endpoint | Add OpenTelemetry exporters, persistent metric aggregation, and dashboard drill-downs |
 | Learning and evaluation | Quality/reliability outcomes and decayed reputation | Add trajectory evaluators, human review, and measurable strategy comparisons wired to routing evidence |
 | Federation | Lease scheduler and recovery model | Add authenticated nodes, signed messages, encrypted transport, heartbeat persistence, and result synchronization |
-| Developer experience | Dashboard shell, examples, measured benchmark, documentation, CI | Add generated API schemas, release manifests, migration guides, package publishing, project init, and plugin SDK |
+| Developer experience | Dashboard shell, examples, measured benchmark, documentation, CI, and a governed custom-plugin manifest/lifecycle example | Add generated API schemas, release manifests, migration guides, package publishing, project init, and plugin SDK ergonomics |
 
 The roadmap intentionally separates what is **implemented and measured** from what is **planned**. Helix will not claim complete parity until each row’s next step has code, tests, and operational evidence.
 
