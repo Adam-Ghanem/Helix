@@ -1,7 +1,7 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { PathValidator, SafeExecutionOptions, SafeExecutionResult, SafeExecutor, assertAbsoluteExecutable, validatePath } from '../../security/src/index.js';
 
 export interface SandboxOptions {
@@ -43,6 +43,11 @@ export interface StrictSandboxOptions {
   maxOutputBytes?: number;
 }
 
+export interface SandboxReadOnlyBind {
+  source: string;
+  target: string;
+}
+
 export interface SandboxExecutionPlan {
   backend: SandboxBackend;
   isolated: boolean;
@@ -78,16 +83,50 @@ export interface SandboxExecutionResult {
   stderrTruncated: boolean;
 }
 
+export interface SandboxSessionRequest {
+  command: string;
+  args: string[];
+  cwd?: string;
+  environment?: Record<string, string>;
+  signal?: AbortSignal;
+  /** Optional total session lifetime. Omit for a persistent session. */
+  timeoutMs?: number;
+  maxFrameBytes?: number;
+  closeGraceMs?: number;
+}
+
+export interface SandboxSessionExit {
+  exitCode: number;
+  signal: NodeJS.Signals | null;
+  stderr: string;
+  stderrTruncated: boolean;
+  error?: string;
+}
+
+export interface SandboxSession {
+  readonly backend: SandboxBackend;
+  readonly isolated: boolean;
+  writeLine(line: string): Promise<void>;
+  onLine(listener: (line: string) => void): () => void;
+  onExit(listener: (result: SandboxSessionExit) => void): () => void;
+  close(): Promise<void>;
+  kill(): void;
+}
+
 export interface ExecutableSandbox {
   readonly backend: SandboxBackend;
   readonly isolated: boolean;
   execute(command: string, args: string[], cwd?: string, environment?: Record<string, string>): Promise<SandboxExecutionResult>;
   executeRequest(request: SandboxExecutionRequest): Promise<SandboxExecutionResult>;
+  spawnSession?: (request: SandboxSessionRequest) => Promise<SandboxSession>;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1_048_576;
+const DEFAULT_MAX_FRAME_BYTES = 1_048_576;
+const DEFAULT_CLOSE_GRACE_MS = 1_000;
 const SAFE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+const PROTECTED_BIND_TARGETS = ['/workspace', '/home', '/proc', '/dev', '/tmp', '/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc', '/run'];
 
 abstract class BaseSandbox implements ExecutableSandbox {
   abstract readonly backend: SandboxBackend;
@@ -115,6 +154,7 @@ abstract class BaseSandbox implements ExecutableSandbox {
   }
 
   abstract executeRequest(request: SandboxExecutionRequest): Promise<SandboxExecutionResult>;
+  abstract spawnSession(request: SandboxSessionRequest): Promise<SandboxSession>;
 
   protected validateCommand(command: string): string {
     return assertAbsoluteExecutable(command, this.allowedCommands);
@@ -156,12 +196,33 @@ export class UnsafeProcessSandbox extends BaseSandbox {
     });
     return { backend: this.backend, isolated: this.isolated, command: executable, args: [...request.args], ...result };
   }
+
+  async spawnSession(request: SandboxSessionRequest): Promise<SandboxSession> {
+    if (request.signal?.aborted) throw new Error('Sandbox session cancelled before start');
+    const executable = this.validateCommand(request.command);
+    const hostCwd = this.resolveCwd(request.cwd ?? '.');
+    const filtered = this.filterEnvironment(request.environment ?? {});
+    return spawnPersistentSession({
+      backend: this.backend,
+      isolated: false,
+      executable,
+      args: [...request.args],
+      cwd: hostCwd,
+      environment: { PATH: process.env.PATH ?? SAFE_PATH, ...filtered },
+      maxOutputBytes: this.maxOutputBytes,
+      maxFrameBytes: positiveInteger(request.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES, 'maxFrameBytes'),
+      closeGraceMs: positiveInteger(request.closeGraceMs ?? DEFAULT_CLOSE_GRACE_MS, 'closeGraceMs'),
+      ...(request.timeoutMs !== undefined ? { timeoutMs: positiveInteger(request.timeoutMs, 'timeoutMs') } : {}),
+      ...(request.signal ? { signal: request.signal } : {}),
+    });
+  }
 }
 
 export interface BubblewrapSandboxOptions extends StrictSandboxOptions {
   bwrapExecutable: string;
   prlimitExecutable?: string;
   runtimeReadOnlyPaths?: string[];
+  readOnlyBinds?: SandboxReadOnlyBind[];
   network?: boolean;
   memoryMb?: number;
   cpuSeconds?: number;
@@ -174,6 +235,7 @@ export class BubblewrapSandbox extends BaseSandbox {
   private readonly bwrapExecutable: string;
   private readonly prlimitExecutable: string | undefined;
   private readonly runtimeReadOnlyPaths: string[];
+  private readonly readOnlyBinds: SandboxReadOnlyBind[];
   private readonly network: boolean;
   private readonly memoryMb: number;
   private readonly cpuSeconds: number;
@@ -189,6 +251,7 @@ export class BubblewrapSandbox extends BaseSandbox {
       return resolve(path);
     });
     if (!this.runtimeReadOnlyPaths.length) throw new Error('Bubblewrap sandbox requires runtime read-only paths');
+    this.readOnlyBinds = normalizeReadOnlyBinds(options.readOnlyBinds ?? []);
     this.network = options.network ?? false;
     this.memoryMb = positiveInteger(options.memoryMb ?? 512, 'memoryMb');
     this.cpuSeconds = positiveInteger(options.cpuSeconds ?? 30, 'cpuSeconds');
@@ -215,6 +278,8 @@ export class BubblewrapSandbox extends BaseSandbox {
       ...(this.network ? [] : ['--unshare-net']),
     ];
     for (const runtimePath of this.runtimeReadOnlyPaths) bwrapArgs.push('--ro-bind', runtimePath, runtimePath);
+    for (const directory of readOnlyBindDirectories(this.readOnlyBinds)) bwrapArgs.push('--dir', directory);
+    for (const bind of this.readOnlyBinds) bwrapArgs.push('--ro-bind', bind.source, bind.target);
     bwrapArgs.push(
       '--bind', this.workspace, '/workspace',
       '--proc', '/proc',
@@ -269,12 +334,31 @@ export class BubblewrapSandbox extends BaseSandbox {
     });
     return { backend: this.backend, isolated: true, command: request.command, args: [...request.args], ...result };
   }
+
+  async spawnSession(request: SandboxSessionRequest): Promise<SandboxSession> {
+    if (request.signal?.aborted) throw new Error('Sandbox session cancelled before start');
+    const plan = this.plan(request.command, request.args, request.cwd ?? '.', request.environment ?? {}, request.timeoutMs);
+    return spawnPersistentSession({
+      backend: this.backend,
+      isolated: true,
+      executable: plan.executable,
+      args: [...plan.args],
+      cwd: plan.cwd,
+      environment: { ...plan.environment },
+      maxOutputBytes: plan.maxOutputBytes,
+      maxFrameBytes: positiveInteger(request.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES, 'maxFrameBytes'),
+      closeGraceMs: positiveInteger(request.closeGraceMs ?? DEFAULT_CLOSE_GRACE_MS, 'closeGraceMs'),
+      ...(request.timeoutMs !== undefined ? { timeoutMs: positiveInteger(request.timeoutMs, 'timeoutMs') } : {}),
+      ...(request.signal ? { signal: request.signal } : {}),
+    });
+  }
 }
 
 export interface SandboxManagerOptions extends StrictSandboxOptions {
   bwrapExecutable?: string;
   prlimitExecutable?: string;
   runtimeReadOnlyPaths?: string[];
+  readOnlyBinds?: SandboxReadOnlyBind[];
   network?: boolean;
   memoryMb?: number;
   cpuSeconds?: number;
@@ -308,6 +392,7 @@ export class SandboxManager {
         bwrapExecutable,
         ...(availability.prlimit ? { prlimitExecutable } : {}),
         ...(this.options.runtimeReadOnlyPaths ? { runtimeReadOnlyPaths: this.options.runtimeReadOnlyPaths } : {}),
+        ...(this.options.readOnlyBinds ? { readOnlyBinds: this.options.readOnlyBinds } : {}),
         ...(this.options.network !== undefined ? { network: this.options.network } : {}),
         ...(this.options.memoryMb !== undefined ? { memoryMb: this.options.memoryMb } : {}),
         ...(this.options.cpuSeconds !== undefined ? { cpuSeconds: this.options.cpuSeconds } : {}),
@@ -400,6 +485,154 @@ function runBounded(input: BoundedRunInput): Promise<BoundedRunResult> {
   });
 }
 
+interface PersistentSessionInput {
+  backend: SandboxBackend;
+  isolated: boolean;
+  executable: string;
+  args: string[];
+  cwd: string;
+  environment: Record<string, string>;
+  maxOutputBytes: number;
+  maxFrameBytes: number;
+  closeGraceMs: number;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+function spawnPersistentSession(input: PersistentSessionInput): SandboxSession {
+  if (input.signal?.aborted) throw new Error('Sandbox session cancelled before start');
+  const child = spawn(input.executable, input.args, { cwd: input.cwd, env: input.environment, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+  return new ProcessSandboxSession(child, input);
+}
+
+class ProcessSandboxSession implements SandboxSession {
+  readonly backend: SandboxBackend;
+  readonly isolated: boolean;
+  private readonly child: ChildProcessWithoutNullStreams;
+  private readonly maxFrameBytes: number;
+  private readonly closeGraceMs: number;
+  private readonly stderr: BoundedBuffer;
+  private readonly lineListeners = new Set<(line: string) => void>();
+  private readonly exitListeners = new Set<(result: SandboxSessionExit) => void>();
+  private pendingStdout = Buffer.alloc(0);
+  private exitResult: SandboxSessionExit | undefined;
+  private terminalError: string | undefined;
+  private lifetimeTimer: NodeJS.Timeout | undefined;
+  private readonly abortSignal: AbortSignal | undefined;
+  private readonly abortListener: (() => void) | undefined;
+
+  constructor(child: ChildProcessWithoutNullStreams, input: PersistentSessionInput) {
+    this.child = child;
+    this.backend = input.backend;
+    this.isolated = input.isolated;
+    this.maxFrameBytes = input.maxFrameBytes;
+    this.closeGraceMs = input.closeGraceMs;
+    this.stderr = new BoundedBuffer(input.maxOutputBytes);
+    this.abortSignal = input.signal;
+    this.abortListener = input.signal ? () => this.fail('Sandbox session cancelled') : undefined;
+
+    child.stdout.on('data', (chunk: Buffer) => this.consumeStdout(chunk));
+    child.stderr.on('data', (chunk: Buffer) => this.stderr.push(chunk));
+    child.on('error', (error) => this.fail(`Sandbox session process error: ${error.message}`));
+    child.on('close', (exitCode, signal) => this.finish(exitCode ?? -1, signal));
+
+    if (input.timeoutMs !== undefined) {
+      this.lifetimeTimer = setTimeout(() => this.fail(`Sandbox session timed out after ${input.timeoutMs}ms`), input.timeoutMs);
+    }
+    input.signal?.addEventListener('abort', this.abortListener!, { once: true });
+  }
+
+  async writeLine(line: string): Promise<void> {
+    if (this.exitResult) throw new Error('Sandbox session is closed');
+    if (line.includes('\n') || line.includes('\r')) throw new Error('Sandbox session line must not contain newline characters');
+    const bytes = Buffer.byteLength(line, 'utf8');
+    if (bytes > this.maxFrameBytes) throw new Error(`Sandbox session frame exceeds ${this.maxFrameBytes} bytes`);
+    const payload = `${line}\n`;
+    await new Promise<void>((resolvePromise, reject) => {
+      this.child.stdin.write(payload, 'utf8', (error) => error ? reject(error) : resolvePromise());
+    });
+  }
+
+  onLine(listener: (line: string) => void): () => void {
+    this.lineListeners.add(listener);
+    return () => this.lineListeners.delete(listener);
+  }
+
+  onExit(listener: (result: SandboxSessionExit) => void): () => void {
+    if (this.exitResult) {
+      const result = structuredClone(this.exitResult);
+      queueMicrotask(() => listener(result));
+      return () => undefined;
+    }
+    this.exitListeners.add(listener);
+    return () => this.exitListeners.delete(listener);
+  }
+
+  async close(): Promise<void> {
+    if (this.exitResult) return;
+    const exited = new Promise<void>((resolvePromise) => {
+      const unsubscribe = this.onExit(() => {
+        unsubscribe();
+        resolvePromise();
+      });
+    });
+    this.child.stdin.end();
+    const killer = setTimeout(() => this.kill(), this.closeGraceMs);
+    try {
+      await exited;
+    } finally {
+      clearTimeout(killer);
+    }
+  }
+
+  kill(): void {
+    if (this.exitResult || this.child.exitCode !== null || this.child.killed) return;
+    this.child.kill('SIGKILL');
+  }
+
+  private consumeStdout(chunk: Buffer): void {
+    if (this.exitResult || this.terminalError) return;
+    this.pendingStdout = this.pendingStdout.length ? Buffer.concat([this.pendingStdout, chunk]) : Buffer.from(chunk);
+    for (;;) {
+      const newline = this.pendingStdout.indexOf(0x0a);
+      if (newline < 0) break;
+      const frame = this.pendingStdout.subarray(0, newline);
+      this.pendingStdout = this.pendingStdout.subarray(newline + 1);
+      const normalized = frame.length && frame[frame.length - 1] === 0x0d ? frame.subarray(0, -1) : frame;
+      if (normalized.length > this.maxFrameBytes) {
+        this.fail(`Sandbox session stdout frame exceeds ${this.maxFrameBytes} bytes`);
+        return;
+      }
+      const line = normalized.toString('utf8');
+      for (const listener of [...this.lineListeners]) listener(line);
+    }
+    if (this.pendingStdout.length > this.maxFrameBytes) this.fail(`Sandbox session stdout frame exceeds ${this.maxFrameBytes} bytes`);
+  }
+
+  private fail(message: string): void {
+    if (this.exitResult || this.terminalError) return;
+    this.terminalError = message;
+    this.kill();
+  }
+
+  private finish(exitCode: number, signal: NodeJS.Signals | null): void {
+    if (this.exitResult) return;
+    if (this.lifetimeTimer) clearTimeout(this.lifetimeTimer);
+    if (this.abortSignal && this.abortListener) this.abortSignal.removeEventListener('abort', this.abortListener);
+    const result: SandboxSessionExit = {
+      exitCode,
+      signal,
+      stderr: this.stderr.text(),
+      stderrTruncated: this.stderr.truncated,
+      ...(this.terminalError ? { error: this.terminalError } : {}),
+    };
+    this.exitResult = result;
+    for (const listener of [...this.exitListeners]) listener(structuredClone(result));
+    this.exitListeners.clear();
+    this.lineListeners.clear();
+  }
+}
+
 class BoundedBuffer {
   private chunks: Buffer[] = [];
   private size = 0;
@@ -451,4 +684,39 @@ function positiveInteger(value: number, name: string): number {
 function isInside(candidate: string, root: string): boolean {
   const remainder = relative(root, candidate);
   return remainder === '' || (!remainder.startsWith('..') && !isAbsolute(remainder));
+}
+
+function normalizeReadOnlyBinds(input: SandboxReadOnlyBind[]): SandboxReadOnlyBind[] {
+  const targets = new Set<string>();
+  return input.map((bind) => {
+    if (!isAbsolute(bind.source)) throw new Error(`Sandbox read-only bind source must be absolute: ${bind.source}`);
+    if (!isAbsolute(bind.target)) throw new Error(`Sandbox read-only bind target must be absolute: ${bind.target}`);
+    const source = resolve(bind.source);
+    const target = resolve(bind.target);
+    if (source === '/' || source === '/home' || source === '/root') throw new Error(`Sandbox read-only bind source is too broad or private: ${source}`);
+    if (target === '/' || PROTECTED_BIND_TARGETS.some((root) => isPathWithin(target, root))) {
+      throw new Error(`Sandbox read-only bind target overlaps a protected path: ${target}`);
+    }
+    if (targets.has(target)) throw new Error(`Duplicate sandbox read-only bind target: ${target}`);
+    targets.add(target);
+    return { source, target };
+  });
+}
+
+function readOnlyBindDirectories(binds: SandboxReadOnlyBind[]): string[] {
+  const directories = new Set<string>();
+  for (const bind of binds) {
+    let current = dirname(bind.target);
+    while (current !== '/' && !PROTECTED_BIND_TARGETS.some((root) => isPathWithin(current, root))) {
+      directories.add(current);
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+  return [...directories].sort((left, right) => left.length - right.length || left.localeCompare(right));
+}
+
+function isPathWithin(candidate: string, root: string): boolean {
+  return candidate === root || candidate.startsWith(`${root}/`);
 }

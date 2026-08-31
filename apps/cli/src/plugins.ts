@@ -1,13 +1,17 @@
 import { readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { AgentRegistry } from '../../../packages/agents/src/index.js';
 import { HookEngine } from '../../../packages/hooks/src/index.js';
 import {
   DurablePluginManager,
   DurablePluginStore,
+  PluginArtifactStore,
+  PluginWorkerManager,
+  StrictPluginWorkerSandboxFactory,
   type ManagedPluginManifest,
   type PluginInstallPolicy,
   type PluginTrustStore,
+  type PluginWorkerRuntime,
 } from '../../../packages/plugins/src/index.js';
 import { ToolRegistry } from '../../../packages/tools/src/index.js';
 
@@ -25,7 +29,12 @@ export async function handlePluginCommand(args: string[], dataDirectory: string)
   if (action === 'install') {
     const path = args[2];
     if (!path) throw new Error('Usage: helix plugins install <manifest.json>');
-    return manager.install(await readManagedManifest(path));
+    const manifestPath = resolve(path);
+    const manifest = await readManagedManifest(manifestPath);
+    const artifactSource = hasExecutableContributions(manifest)
+      ? resolve(dirname(manifestPath), manifest.entrypoint)
+      : undefined;
+    return manager.install(manifest, artifactSource);
   }
   if (action === 'enable') return manager.enable(requireId(args[2], 'enable'));
   if (action === 'disable') return manager.disable(requireId(args[2], 'disable'));
@@ -45,6 +54,23 @@ async function createCliPluginManager(dataDirectory: string): Promise<DurablePlu
     allowedApiVersions: parseCsv(process.env.HELIX_PLUGIN_ALLOWED_API_VERSIONS),
     maxContributionsPerKind: 64,
   };
+  const nodeExecutable = pluginNodeExecutable();
+  const bwrapExecutable = optionalAbsoluteExecutable(process.env.HELIX_PLUGIN_BWRAP_EXECUTABLE, 'HELIX_PLUGIN_BWRAP_EXECUTABLE');
+  const artifacts = new PluginArtifactStore({ directory: join(dataDirectory, 'plugins-artifacts') });
+  const workers = new PluginWorkerManager({
+    artifacts,
+    sandboxFactory: new StrictPluginWorkerSandboxFactory({
+      workspaceRoot: resolve(join(dataDirectory, 'plugin-workspaces')),
+      ...(bwrapExecutable ? { bwrapExecutable } : {}),
+    }),
+    nodeExecutable,
+  });
+  const preflightRuntime: PluginWorkerRuntime = {
+    start: (pluginId, manifest, artifact) => workers.preflight(pluginId, manifest, artifact),
+    callTool: async (pluginId) => { throw new Error(`CLI plugin worker is preflight-only and does not retain tool sessions: ${pluginId}`); },
+    callHook: async (pluginId) => { throw new Error(`CLI plugin worker is preflight-only and does not retain hook sessions: ${pluginId}`); },
+    stop: async () => undefined,
+  };
   const manager = new DurablePluginManager({
     store: new DurablePluginStore({ directory: join(dataDirectory, 'plugins') }),
     trust,
@@ -52,6 +78,8 @@ async function createCliPluginManager(dataDirectory: string): Promise<DurablePlu
     tools: new ToolRegistry(),
     hooks: new HookEngine(),
     agents: new AgentRegistry(false),
+    artifacts,
+    workers: preflightRuntime,
   });
   await manager.init();
   return manager;
@@ -83,6 +111,26 @@ async function readManagedManifest(path: string): Promise<ManagedPluginManifest>
     throw new Error('Invalid plugin manifest: contributions must be an object');
   }
   return parsed as unknown as ManagedPluginManifest;
+}
+
+function pluginNodeExecutable(): string {
+  const configured = process.env.HELIX_PLUGIN_NODE_EXECUTABLE;
+  if (configured !== undefined) {
+    if (!configured.trim() || !isAbsolute(configured)) throw new Error('HELIX_PLUGIN_NODE_EXECUTABLE must be an absolute executable path');
+    return resolve(configured);
+  }
+  if (!isAbsolute(process.execPath)) throw new Error('Current Node executable path is not absolute');
+  return resolve(process.execPath);
+}
+
+function optionalAbsoluteExecutable(value: string | undefined, name: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (!value.trim() || !isAbsolute(value)) throw new Error(`${name} must be an absolute executable path`);
+  return resolve(value);
+}
+
+function hasExecutableContributions(manifest: ManagedPluginManifest): boolean {
+  return (manifest.contributions?.tools?.length ?? 0) > 0 || (manifest.contributions?.hooks?.length ?? 0) > 0;
 }
 
 function parseTrustKeys(raw: string | undefined): Record<string, string> {

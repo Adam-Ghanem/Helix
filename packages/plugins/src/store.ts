@@ -13,6 +13,12 @@ export interface ManagedPluginRegistrations {
   agents: string[];
 }
 
+export interface ManagedPluginArtifactRecord {
+  digest: string;
+  path: string;
+  size: number;
+}
+
 export interface ManagedPluginRecord {
   manifest: ManagedPluginManifest;
   manifestDigest: string;
@@ -21,6 +27,7 @@ export interface ManagedPluginRecord {
   installedAt: string;
   updatedAt: string;
   registrations: ManagedPluginRegistrations;
+  artifact?: ManagedPluginArtifactRecord;
 }
 
 interface PluginStoreDocument {
@@ -156,7 +163,16 @@ function validateRecord(value: unknown): ManagedPluginRecord {
   if (!isRecord(value.registrations) || !isStringArray(value.registrations.tools) || !isStringArray(value.registrations.hooks) || !isStringArray(value.registrations.agents)) {
     throw new Error(`Invalid durable plugin registrations: ${manifest.id}`);
   }
+  if (value.artifact !== undefined) validateArtifactRecord(value.artifact, manifest.id);
   return cloneRecord(value as unknown as ManagedPluginRecord);
+}
+
+function validateArtifactRecord(value: unknown, pluginId: string): ManagedPluginArtifactRecord {
+  if (!isRecord(value)) throw new Error(`Invalid durable plugin artifact: ${pluginId}`);
+  if (typeof value.digest !== 'string' || !/^[a-f0-9]{64}$/.test(value.digest)) throw new Error(`Invalid durable plugin artifact digest: ${pluginId}`);
+  if (typeof value.path !== 'string' || !value.path.trim()) throw new Error(`Invalid durable plugin artifact path: ${pluginId}`);
+  if (!Number.isInteger(value.size) || (value.size as number) < 0) throw new Error(`Invalid durable plugin artifact size: ${pluginId}`);
+  return { digest: value.digest, path: value.path, size: value.size as number };
 }
 
 function cloneRecord(record: ManagedPluginRecord): ManagedPluginRecord {
@@ -167,6 +183,7 @@ function cloneRecord(record: ManagedPluginRecord): ManagedPluginRecord {
       hooks: [...record.registrations.hooks],
       agents: [...record.registrations.agents],
     },
+    ...(record.artifact ? { artifact: { ...record.artifact } } : {}),
   };
 }
 
