@@ -17,7 +17,9 @@ test('distributed coordinator renews the authoritative lease during a long HTTP 
     state: workerState,
     execute: async () => {
       executions += 1;
-      await new Promise((resolve) => setTimeout(resolve, 120));
+      // Keep execution at 3x the lease so renewal remains mandatory while
+      // leaving enough scheduling headroom for heavily contended CI runners.
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
       return { success: true, output: { longRunning: true } };
     },
   });
@@ -25,12 +27,12 @@ test('distributed coordinator renews the authoritative lease during a long HTTP 
   try {
     const originState = new DurableFederationState({ stateFile: join(directory, 'origin.json'), localNodeId: 'coordinator', secret });
     await originState.init();
-    const client = new FederationHttpClient({ nodeId: 'coordinator', secret, state: originState, timeoutMs: 1_000 });
+    const client = new FederationHttpClient({ nodeId: 'coordinator', secret, state: originState, timeoutMs: 4_000 });
     const coordinator = new DistributedRuntimeCoordinator({
       state: originState,
       client,
-      leaseMs: 40,
-      heartbeatTimeoutMs: 1_000,
+      leaseMs: 500,
+      heartbeatTimeoutMs: 5_000,
       maxAttempts: 2,
     });
     await coordinator.heartbeatNode({ id: 'worker-1', endpoint: started.endpoint, capabilities: ['coding'], load: 0 });

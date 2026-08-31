@@ -108,8 +108,14 @@ export class CodingHarness {
     };
 
     let implementation: CodingAgentResult;
-    try { implementation = await this.adapter.run(request); }
-    catch (error) { return this.fail(sessionId, error instanceof Error ? error.message : String(error), 'adapter-exception'); }
+    try {
+      const nativeSessionRef = resumed && this.adapter.resume ? await this.latestAdapterSessionRef(sessionId) : undefined;
+      implementation = nativeSessionRef && this.adapter.resume
+        ? await this.adapter.resume(nativeSessionRef, request)
+        : await this.adapter.run(request);
+    } catch (error) {
+      return this.fail(sessionId, error instanceof Error ? error.message : String(error), 'adapter-exception');
+    }
     await this.store.appendEvidence(sessionId, { type: 'adapter-output', data: structuredClone(implementation) as unknown as Record<string, unknown> });
     if (!implementation.success) return this.fail(sessionId, implementation.error ?? 'Coding adapter failed', 'adapter-result');
 
@@ -154,6 +160,18 @@ export class CodingHarness {
     await this.recordLearning(final, implementation, review, test, judge, Math.max(0, Math.round(performance.now() - attemptStarted)));
     await this.runHook('session-end', final, { status: final.status, verdict: final.finalVerdict });
     return (await this.store.getSession(sessionId))!;
+  }
+
+  private async latestAdapterSessionRef(sessionId: string): Promise<string | undefined> {
+    const evidence = await this.store.evidenceForSession(sessionId);
+    for (let index = evidence.length - 1; index >= 0; index -= 1) {
+      const record = evidence[index];
+      if (!record || record.type !== 'adapter-output') continue;
+      if (typeof record.data.adapter === 'string' && record.data.adapter !== this.adapter.name) continue;
+      const sessionRef = record.data.sessionRef;
+      if (typeof sessionRef === 'string' && sessionRef.trim()) return sessionRef;
+    }
+    return undefined;
   }
 
   private async runHook(event: HookEventName, session: CodingSessionRecord, payload: Record<string, unknown>): Promise<HookRunResult> {
