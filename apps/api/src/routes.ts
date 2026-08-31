@@ -8,6 +8,7 @@ export interface HelixRequestHandlerOptions {
   runtime: HelixRuntime;
   security: HttpSecurityOptions;
   dashboardRoot: string;
+  dataDirectory?: string;
 }
 
 export type HelixRequestHandler = (request: IncomingMessage, response: ServerResponse) => Promise<void>;
@@ -148,7 +149,12 @@ export function createHelixRequestHandler(options: HelixRequestHandlerOptions): 
         return;
       }
       if (url.pathname === '/api/v1/verify' && request.method === 'GET') {
-        http.json(response, 200, { ok: true, sequence: runtime.events.lastSequence, provider: runtime.provider.name });
+        http.json(response, 200, {
+          ok: true,
+          sequence: runtime.events.lastSequence,
+          provider: runtime.provider.name,
+          ...(options.dataDirectory ? { dataDirectory: options.dataDirectory } : {}),
+        });
         return;
       }
       http.json(response, 404, { error: 'not_found' });
