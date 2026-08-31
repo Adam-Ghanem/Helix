@@ -9,7 +9,7 @@ import {
   type PluginTrustStore,
 } from '../packages/plugins/src/index.js';
 
-test('managed signature remains valid after normalization removes duplicate signed set fields', () => {
+test('managed signature remains valid after normalization of signed set fields and digest casing', () => {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
   const manifest: ManagedPluginManifest = {
     id: 'canonical-reviewer',
@@ -20,7 +20,7 @@ test('managed signature remains valid after normalization removes duplicate sign
     capabilities: ['analysis', 'analysis'],
     tools: ['inspect', 'inspect'],
     entrypoint: './plugin.js',
-    artifactDigest: createHash('sha256').update('artifact').digest('hex'),
+    artifactDigest: createHash('sha256').update('artifact').digest('hex').toUpperCase(),
     signerKeyId: 'publisher',
     signature: '',
     contributions: {
@@ -39,5 +39,6 @@ test('managed signature remains valid after normalization removes duplicate sign
   assert.deepEqual(first.manifest.permissions, ['skill:register']);
   assert.deepEqual(first.manifest.capabilities, ['analysis']);
   assert.deepEqual(first.manifest.tools, ['inspect']);
+  assert.equal(first.manifest.artifactDigest, manifest.artifactDigest.toLowerCase());
   assert.doesNotThrow(() => verifyManagedManifest(first.manifest, trust, policy));
 });
