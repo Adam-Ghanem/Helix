@@ -3,7 +3,7 @@ import { DurableFederationState } from './state.js';
 import { FederationRouter } from './router.js';
 
 export interface FederationTaskDispatcher {
-  dispatchTask(input: { endpoint: string; task: FederationTask }): Promise<FederationResult>;
+  dispatchTaskResult(input: { endpoint: string; task: FederationTask }): Promise<FederationResult>;
 }
 
 export interface DistributedRuntimeCoordinatorOptions {
@@ -106,7 +106,7 @@ export class DistributedRuntimeCoordinator {
     let result: FederationResult | undefined;
     let dispatchError: unknown;
     try {
-      result = await this.client.dispatchTask({ endpoint: node.endpoint, task: leasedTask });
+      result = await this.client.dispatchTaskResult({ endpoint: node.endpoint, task: leasedTask });
     } catch (error) {
       dispatchError = error;
     } finally {
@@ -120,6 +120,13 @@ export class DistributedRuntimeCoordinator {
     const alreadyCommitted = await this.state.getResult(result.id);
     if (alreadyCommitted) return alreadyCommitted;
     if (renewalError !== undefined) throw renewalError;
+
+    // Refresh once after the transport has returned and the periodic renewal loop
+    // has stopped. This closes the response-to-commit timing window while keeping
+    // expiry/fencing fail-closed: an already expired lease still cannot be revived.
+    if (now === undefined) {
+      await this.state.heartbeatLease(lease.id, node.id, { leaseMs: this.leaseMs });
+    }
     return this.state.commitLeasedResult(result, now ?? Date.now());
   }
 
