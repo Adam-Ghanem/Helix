@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { PluginArtifactStore, type ManagedPluginArtifactRecord } from '../packages/plugins/src/index.js';
@@ -76,6 +76,7 @@ test('plugin artifact verification fails closed after managed bytes are tampered
     const directory = join(root, 'managed');
     const store = new PluginArtifactStore({ directory });
     const record = await store.install(source, digest);
+    await chmod(record.path, 0o600);
     await writeFile(record.path, 'console.log("tampered");\n', 'utf8');
     await assert.rejects(() => store.verify(record, digest), /digest|tamper|artifact/i);
 
