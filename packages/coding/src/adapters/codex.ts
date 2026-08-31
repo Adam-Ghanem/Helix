@@ -34,6 +34,9 @@ export class CodexCliAdapter implements CodingAgentAdapter {
     if (!options.executable.trim()) throw new Error('Codex executable is required');
     if (options.model !== undefined && !options.model.trim()) throw new Error('Codex model must not be empty');
     if (options.profile !== undefined && !options.profile.trim()) throw new Error('Codex profile must not be empty');
+    if (options.isolation === 'helix' && options.runner.isolated !== true) {
+      throw new Error('Codex sandbox bypass requires a proven isolated Helix process runner');
+    }
     this.executable = options.executable;
     this.runner = options.runner;
     this.isolation = options.isolation;
