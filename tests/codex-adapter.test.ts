@@ -9,7 +9,12 @@ import {
 
 class FixtureRunner implements ProcessRunner {
   readonly requests: BoundedProcessRequest[] = [];
-  constructor(private readonly stdout: string, private readonly exitCode = 0, private readonly stderr = '') {}
+  constructor(
+    private readonly stdout: string,
+    private readonly exitCode = 0,
+    private readonly stderr = '',
+    readonly isolated = false,
+  ) {}
 
   async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
     this.requests.push(structuredClone(request));
@@ -50,7 +55,7 @@ const request = {
 };
 
 test('Codex adapter uses Helix as the outer sandbox and parses JSONL evidence', async () => {
-  const runner = new FixtureRunner(events);
+  const runner = new FixtureRunner(events, 0, '', true);
   const adapter = new CodexCliAdapter({ executable: '/usr/local/bin/codex', runner, isolation: 'helix' });
 
   const result = await adapter.run(request);
@@ -67,6 +72,13 @@ test('Codex adapter uses Helix as the outer sandbox and parses JSONL evidence', 
   assert.match(runner.requests[0]?.stdin ?? '', /Implement parser/);
   assert.match(runner.requests[0]?.stdin ?? '', /Helix context:/);
   assert.match(runner.requests[0]?.stdin ?? '', /Prefer streaming parsers/);
+});
+
+test('Codex adapter refuses sandbox bypass without a proven isolated runner', () => {
+  assert.throws(
+    () => new CodexCliAdapter({ executable: '/opt/codex', runner: new FixtureRunner(events), isolation: 'helix' }),
+    /isolated|isolation|sandbox/i,
+  );
 });
 
 test('Codex adapter keeps Codex workspace-write sandbox when Helix host mode is explicit', async () => {
