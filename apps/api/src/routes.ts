@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import type { HelixRuntime } from '../../../packages/runtime/src/index.js';
+import type { EventStreamHub } from './event-stream.js';
 import { parseLimit, parseSequence, readEventsAfter } from './events.js';
 import { createHttpHelpers, type HttpSecurityOptions } from './http.js';
 
@@ -10,6 +11,7 @@ export interface HelixRequestHandlerOptions {
   security: HttpSecurityOptions;
   dashboardRoot: string;
   dataDirectory?: string;
+  eventStream?: EventStreamHub;
 }
 
 export type HelixRequestHandler = (request: IncomingMessage, response: ServerResponse) => Promise<void>;
@@ -34,7 +36,7 @@ export function createHelixRequestHandler(options: HelixRequestHandlerOptions): 
         response.writeHead(204, {
           ...http.corsHeaders(),
           'access-control-allow-methods': 'GET,POST,OPTIONS',
-          'access-control-allow-headers': 'authorization,content-type,x-helix-approver',
+          'access-control-allow-headers': 'authorization,content-type,x-helix-approver,last-event-id',
         });
         response.end();
         return;
@@ -46,6 +48,15 @@ export function createHelixRequestHandler(options: HelixRequestHandlerOptions): 
       }
       if (!http.withinRateLimit(request)) {
         http.json(response, 429, { error: 'rate_limit_exceeded' });
+        return;
+      }
+
+      if (url.pathname === '/api/v1/events/stream' && request.method === 'GET') {
+        if (!options.eventStream) {
+          http.json(response, 404, { error: 'not_found' });
+          return;
+        }
+        await options.eventStream.handle(request, response, url, http.corsHeaders());
         return;
       }
 
@@ -167,7 +178,7 @@ export function createHelixRequestHandler(options: HelixRequestHandlerOptions): 
         return;
       }
       const message = error instanceof Error ? error.message : String(error);
-      const status = error instanceof SyntaxError || /unknown|not found|exceeds|invalid|already|not failed|JSON|body|safe integer|limit|after/i.test(message) ? 400 : 500;
+      const status = error instanceof SyntaxError || /unknown|not found|exceeds|invalid|already|not failed|JSON|body|safe integer|limit|after|cursor|conflict/i.test(message) ? 400 : 500;
       http.json(response, status, { error: message });
     }
   };
