@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import {
   BoundedProcessRunner,
   ClaudeCodeAdapter,
+  CodexCliAdapter,
   CodingAgentAdapter,
   CodingHarness,
   CodingSessionStore,
@@ -217,6 +218,23 @@ async function createCodingAdapter(name: string): Promise<CodingAgentAdapter> {
     if (!executable || !isAbsolute(executable)) throw new Error('HELIX_CLAUDE_EXECUTABLE must be an absolute executable path');
     const envKeys = environmentKeys();
     return new ClaudeCodeAdapter({ executable, runner: await codingProcessRunner(executable, workspaceRoot, envKeys), environment: environmentValues(envKeys) });
+  }
+  if (name === 'codex') {
+    const executable = process.env.HELIX_CODEX_EXECUTABLE;
+    if (!executable || !isAbsolute(executable)) throw new Error('HELIX_CODEX_EXECUTABLE must be an absolute executable path');
+    const envKeys = environmentKeys();
+    const sandboxMode = process.env.HELIX_CODE_SANDBOX ?? 'strict';
+    if (sandboxMode !== 'strict' && sandboxMode !== 'host') throw new Error('HELIX_CODE_SANDBOX must be "strict" or "host"; host execution is an explicit opt-in.');
+    const network = parseBoolean(process.env.HELIX_CODE_SANDBOX_NETWORK, 'HELIX_CODE_SANDBOX_NETWORK');
+    if (sandboxMode === 'strict' && !network) throw new Error('Codex requires network access in Helix strict sandbox mode; set HELIX_CODE_SANDBOX_NETWORK=true explicitly.');
+    return new CodexCliAdapter({
+      executable,
+      runner: await codingProcessRunner(executable, workspaceRoot, envKeys),
+      isolation: sandboxMode === 'strict' ? 'helix' : 'codex',
+      environment: environmentValues(envKeys),
+      ...(process.env.HELIX_CODEX_MODEL ? { model: process.env.HELIX_CODEX_MODEL } : {}),
+      ...(process.env.HELIX_CODEX_PROFILE ? { profile: process.env.HELIX_CODEX_PROFILE } : {}),
+    });
   }
   if (name === 'generic') {
     const executable = process.env.HELIX_CODE_EXECUTABLE;
