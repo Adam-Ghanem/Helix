@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { join, resolve } from 'node:path';
 import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
+import { EventStreamHub } from './event-stream.js';
 import { createHelixRequestHandler } from './routes.js';
 
 const port = boundedIntegerEnv('HELIX_PORT', 8787, 0, 65_535);
@@ -16,9 +17,21 @@ const rateLimitPerMinute = boundedIntegerEnv('HELIX_RATE_LIMIT_PER_MINUTE', 120,
 const runtime = new HelixRuntime({ dataDirectory, ...(modelProvider ? { provider: modelProvider } : {}) });
 await runtime.init();
 
+const eventStream = new EventStreamHub({
+  store: runtime.events,
+  options: {
+    replayMax: boundedIntegerEnv('HELIX_EVENT_STREAM_REPLAY_MAX', 1_000, 1, 1_000),
+    pollMs: boundedIntegerEnv('HELIX_EVENT_STREAM_POLL_MS', 500, 1, 60_000),
+    heartbeatMs: boundedIntegerEnv('HELIX_EVENT_STREAM_HEARTBEAT_MS', 15_000, 1, 300_000),
+    maxClients: boundedIntegerEnv('HELIX_EVENT_STREAM_MAX_CLIENTS', 64, 1, 4_096),
+    maxPendingBytes: boundedIntegerEnv('HELIX_EVENT_STREAM_MAX_PENDING_BYTES', 262_144, 1, 16 * 1024 * 1024),
+  },
+});
+
 const handler = createHelixRequestHandler({
   runtime,
   dataDirectory,
+  eventStream,
   dashboardRoot: resolve(process.cwd(), 'apps/dashboard'),
   security: {
     maxBodyBytes,
@@ -34,8 +47,16 @@ const server = createServer((request, response) => {
 
 server.listen(port, host, () => console.log(`Helix API listening on http://${host}:${port}`));
 
-process.on('SIGTERM', () => server.close());
-process.on('SIGINT', () => server.close());
+let shuttingDown = false;
+async function shutdown(): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  await eventStream.close();
+  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+}
+
+process.on('SIGTERM', () => void shutdown());
+process.on('SIGINT', () => void shutdown());
 
 function boundedIntegerEnv(name: string, fallback: number, minimum: number, maximum: number): number {
   const raw = process.env[name];
@@ -47,4 +68,4 @@ function boundedIntegerEnv(name: string, fallback: number, minimum: number, maxi
   return parsed;
 }
 
-export { server, runtime };
+export { eventStream, server, runtime };
