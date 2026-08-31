@@ -22,7 +22,7 @@ interface EventStreamClient {
   lastSequence: number;
   pendingBytes: number;
   closed: boolean;
-  removeDrain?: () => void;
+  removeDrain: (() => void) | undefined;
 }
 
 const DEFAULT_REPLAY_MAX = 1_000;
@@ -103,6 +103,7 @@ export class EventStreamHub {
       lastSequence: cursor,
       pendingBytes: 0,
       closed: false,
+      removeDrain: undefined,
     };
     this.clients.set(client.id, client);
 
