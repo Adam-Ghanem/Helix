@@ -33,37 +33,14 @@ test('plugin worker manager requires an absolute Node executable at the security
 test('plugin worker terminates the session on a malformed JSON-RPC error envelope', async () => {
   const root = await mkdtemp(join(tmpdir(), 'helix-plugin-worker-hardening-'));
   try {
-    const bytes = await readFile(FIXTURE);
-    const digest = createHash('sha256').update(bytes).digest('hex');
-    const artifacts = new PluginArtifactStore({ directory: join(root, 'artifacts') });
-    const artifact = await artifacts.install(FIXTURE, digest);
-    const manifest: ManagedPluginManifest = {
-      id: 'hardening-worker',
-      name: 'Hardening Worker',
-      version: '1.0.0',
-      apiVersion: 'v1',
-      permissions: ['tool:register'],
-      capabilities: ['analysis'],
-      entrypoint: './worker.mjs',
-      artifactDigest: digest,
-      signerKeyId: 'test-key',
-      signature: 'test-signature',
-      contributions: {
-        tools: [{ name: 'echo', description: 'Echo', risk: 'low', permissions: [], inputSchema: {} }],
-      },
-    };
-
+    const setup = await workerFixture(root, 'hardening-worker');
     let killed = 0;
     const sandboxFactory: PluginWorkerSandboxFactory = {
       create: async () => {
         const session = new ProtocolSession((line, current) => {
           const request = JSON.parse(line) as { id: string; method: string };
           if (request.method === 'plugin/handshake') {
-            current.emitLine(JSON.stringify({
-              jsonrpc: '2.0',
-              id: request.id,
-              result: { protocolVersion: '1', pluginId: manifest.id, capabilities: { tools: true, hooks: false } },
-            }));
+            current.emitLine(handshakeResponse(request.id, setup.manifest.id));
             return;
           }
           current.emitLine(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: 'not-an-error-object' }));
@@ -73,22 +50,80 @@ test('plugin worker terminates the session on a malformed JSON-RPC error envelop
     };
 
     const manager = new PluginWorkerManager({
-      artifacts,
+      artifacts: setup.artifacts,
       sandboxFactory,
       nodeExecutable: process.execPath,
       handshakeTimeoutMs: 500,
     });
-    await manager.start(manifest.id, manifest, artifact);
+    await manager.start(setup.manifest.id, setup.manifest, setup.artifact);
     await assert.rejects(
-      () => manager.callTool(manifest.id, 'echo', {}),
+      () => manager.callTool(setup.manifest.id, 'echo', {}),
       /protocol.*error|error.*object/i,
     );
     assert.equal(killed, 1, 'malformed protocol output must terminate the worker session');
-    await manager.stop(manifest.id);
+    await manager.stop(setup.manifest.id);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('plugin worker stop force-kills the isolated session when graceful close fails', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'helix-plugin-worker-stop-'));
+  try {
+    const setup = await workerFixture(root, 'stop-worker');
+    let killed = 0;
+    const sandboxFactory: PluginWorkerSandboxFactory = {
+      create: async () => isolatedSandbox(new ProtocolSession((line, current) => {
+        const request = JSON.parse(line) as { id: string; method: string };
+        if (request.method === 'plugin/handshake') current.emitLine(handshakeResponse(request.id, setup.manifest.id));
+      }, () => { killed += 1; }, true)),
+    };
+    const manager = new PluginWorkerManager({
+      artifacts: setup.artifacts,
+      sandboxFactory,
+      nodeExecutable: process.execPath,
+      handshakeTimeoutMs: 500,
+    });
+
+    await manager.start(setup.manifest.id, setup.manifest, setup.artifact);
+    await manager.stop(setup.manifest.id);
+    assert.equal(killed, 1, 'failed graceful shutdown must force-kill the isolated worker');
+    await assert.rejects(() => manager.callTool(setup.manifest.id, 'echo', {}), /not started/i);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function workerFixture(root: string, id: string) {
+  const bytes = await readFile(FIXTURE);
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  const artifacts = new PluginArtifactStore({ directory: join(root, 'artifacts') });
+  const artifact = await artifacts.install(FIXTURE, digest);
+  const manifest: ManagedPluginManifest = {
+    id,
+    name: 'Hardening Worker',
+    version: '1.0.0',
+    apiVersion: 'v1',
+    permissions: ['tool:register'],
+    capabilities: ['analysis'],
+    entrypoint: './worker.mjs',
+    artifactDigest: digest,
+    signerKeyId: 'test-key',
+    signature: 'test-signature',
+    contributions: {
+      tools: [{ name: 'echo', description: 'Echo', risk: 'low', permissions: [], inputSchema: {} }],
+    },
+  };
+  return { artifacts, artifact, manifest };
+}
+
+function handshakeResponse(id: string, pluginId: string): string {
+  return JSON.stringify({
+    jsonrpc: '2.0',
+    id,
+    result: { protocolVersion: '1', pluginId, capabilities: { tools: true, hooks: false } },
+  });
+}
 
 function isolatedSandbox(session: SandboxSession): ExecutableSandbox {
   return {
@@ -110,6 +145,7 @@ class ProtocolSession implements SandboxSession {
   constructor(
     private readonly responder: (line: string, session: ProtocolSession) => void,
     private readonly onKill: () => void,
+    private readonly closeShouldThrow = false,
   ) {}
 
   async writeLine(line: string): Promise<void> {
@@ -128,6 +164,7 @@ class ProtocolSession implements SandboxSession {
   }
 
   async close(): Promise<void> {
+    if (this.closeShouldThrow) throw new Error('graceful close failed');
     this.emitExit({ exitCode: 0, signal: null, stderr: '', stderrTruncated: false });
   }
 
