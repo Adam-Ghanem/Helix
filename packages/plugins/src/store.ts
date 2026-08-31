@@ -68,8 +68,16 @@ export class DurablePluginStore {
     this.assertInitialized();
     validateRecord(record);
     return this.serialize(async () => {
-      this.records.set(record.manifest.id, cloneRecord(record));
-      await this.persist();
+      const id = record.manifest.id;
+      const previous = this.records.get(id);
+      this.records.set(id, cloneRecord(record));
+      try {
+        await this.persist();
+      } catch (error) {
+        if (previous) this.records.set(id, cloneRecord(previous));
+        else this.records.delete(id);
+        throw error;
+      }
       return cloneRecord(record);
     });
   }
@@ -90,9 +98,16 @@ export class DurablePluginStore {
   async remove(id: string): Promise<boolean> {
     this.assertInitialized();
     return this.serialize(async () => {
-      const removed = this.records.delete(id);
-      if (removed) await this.persist();
-      return removed;
+      const previous = this.records.get(id);
+      if (!previous) return false;
+      this.records.delete(id);
+      try {
+        await this.persist();
+      } catch (error) {
+        this.records.set(id, cloneRecord(previous));
+        throw error;
+      }
+      return true;
     });
   }
 
