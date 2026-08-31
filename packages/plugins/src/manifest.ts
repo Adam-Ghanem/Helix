@@ -77,9 +77,9 @@ export function managedPluginSigningPayload(manifest: ManagedPluginManifest): Bu
     name: manifest.name,
     version: manifest.version,
     apiVersion: manifest.apiVersion,
-    permissions: [...manifest.permissions].sort(),
-    capabilities: [...(manifest.capabilities ?? [])].sort(),
-    tools: [...(manifest.tools ?? [])].sort(),
+    permissions: canonicalSet(manifest.permissions),
+    capabilities: canonicalSet(manifest.capabilities ?? []),
+    tools: canonicalSet(manifest.tools ?? []),
     entrypoint: manifest.entrypoint,
     integrity: manifest.integrity ?? null,
     artifactDigest: manifest.artifactDigest,
@@ -190,30 +190,34 @@ function normalizeManagedManifest(manifest: ManagedPluginManifest): ManagedPlugi
   return {
     ...structuredClone(manifest),
     artifactDigest: manifest.artifactDigest.toLowerCase(),
-    permissions: [...new Set(manifest.permissions)].sort(),
-    ...(manifest.capabilities ? { capabilities: [...new Set(manifest.capabilities)].sort() } : {}),
-    ...(manifest.tools ? { tools: [...new Set(manifest.tools)].sort() } : {}),
+    permissions: canonicalSet(manifest.permissions),
+    ...(manifest.capabilities ? { capabilities: canonicalSet(manifest.capabilities) } : {}),
+    ...(manifest.tools ? { tools: canonicalSet(manifest.tools) } : {}),
     ...(manifest.contributions ? { contributions: normalizeContributions(manifest.contributions) } : {}),
   };
 }
 
 function normalizeContributions(input: PluginContributionSet): PluginContributionSet {
   return {
-    ...(input.tools ? { tools: input.tools.map((tool) => ({ ...structuredClone(tool), permissions: [...new Set(tool.permissions)].sort() })) } : {}),
-    ...(input.hooks ? { hooks: input.hooks.map((hook) => ({ ...structuredClone(hook), events: [...new Set(hook.events)] })) } : {}),
-    ...(input.agents ? { agents: input.agents.map((agent) => ({ ...structuredClone(agent), capabilities: [...new Set(agent.capabilities)].sort(), ...(agent.permissions ? { permissions: [...new Set(agent.permissions)].sort() } : {}) })) } : {}),
-    ...(input.skills ? { skills: input.skills.map((skill) => ({ ...structuredClone(skill), ...(skill.requiredTools ? { requiredTools: [...new Set(skill.requiredTools)].sort() } : {}), ...(skill.requiredCapabilities ? { requiredCapabilities: [...new Set(skill.requiredCapabilities)].sort() } : {}) })) } : {}),
+    ...(input.tools ? { tools: input.tools.map((tool) => ({ ...structuredClone(tool), permissions: canonicalSet(tool.permissions) })) } : {}),
+    ...(input.hooks ? { hooks: input.hooks.map((hook) => ({ ...structuredClone(hook), events: canonicalSet(hook.events) })) } : {}),
+    ...(input.agents ? { agents: input.agents.map((agent) => ({ ...structuredClone(agent), capabilities: canonicalSet(agent.capabilities), ...(agent.permissions ? { permissions: canonicalSet(agent.permissions) } : {}) })) } : {}),
+    ...(input.skills ? { skills: input.skills.map((skill) => ({ ...structuredClone(skill), ...(skill.requiredTools ? { requiredTools: canonicalSet(skill.requiredTools) } : {}), ...(skill.requiredCapabilities ? { requiredCapabilities: canonicalSet(skill.requiredCapabilities) } : {}) })) } : {}),
   };
 }
 
 function canonicalContributionSet(input: PluginContributionSet | undefined): unknown {
   if (!input) return null;
   return {
-    tools: (input.tools ?? []).map((tool) => ({ ...tool, permissions: [...tool.permissions].sort() })),
-    hooks: (input.hooks ?? []).map((hook) => ({ ...hook, events: [...hook.events].sort() })),
-    agents: (input.agents ?? []).map((agent) => ({ ...agent, capabilities: [...agent.capabilities].sort(), permissions: [...(agent.permissions ?? [])].sort() })),
-    skills: (input.skills ?? []).map((skill) => ({ ...skill, requiredTools: [...(skill.requiredTools ?? [])].sort(), requiredCapabilities: [...(skill.requiredCapabilities ?? [])].sort() })),
+    tools: (input.tools ?? []).map((tool) => ({ ...tool, permissions: canonicalSet(tool.permissions) })),
+    hooks: (input.hooks ?? []).map((hook) => ({ ...hook, events: canonicalSet(hook.events) })),
+    agents: (input.agents ?? []).map((agent) => ({ ...agent, capabilities: canonicalSet(agent.capabilities), permissions: canonicalSet(agent.permissions ?? []) })),
+    skills: (input.skills ?? []).map((skill) => ({ ...skill, requiredTools: canonicalSet(skill.requiredTools ?? []), requiredCapabilities: canonicalSet(skill.requiredCapabilities ?? []) })),
   };
+}
+
+function canonicalSet<T extends string>(values: readonly T[]): T[] {
+  return [...new Set(values)].sort();
 }
 
 function stableJson(value: unknown): string {
