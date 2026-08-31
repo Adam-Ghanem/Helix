@@ -65,18 +65,21 @@ export class DurablePluginManager {
     await this.store.init();
     const durable = await this.store.list();
     this.records.clear();
-    for (const record of durable) this.records.set(record.manifest.id, cloneRecord(record));
 
     const restored: Array<{ pluginId: string; registrations: ManagedPluginRegistrations }> = [];
     try {
       for (const record of durable) {
-        if (record.status !== 'enabled') continue;
         const verified = verifyManagedManifest(record.manifest, this.trust, this.policy);
         if (verified.manifestDigest !== record.manifestDigest) {
           throw new Error(`Plugin durable manifest digest mismatch: ${record.manifest.id}`);
         }
-        const registrations = await this.registerContributions(verified.manifest);
-        restored.push({ pluginId: record.manifest.id, registrations });
+
+        let registrations = emptyRegistrations();
+        if (record.status === 'enabled') {
+          registrations = await this.registerContributions(verified.manifest);
+          restored.push({ pluginId: record.manifest.id, registrations });
+        }
+
         const next: ManagedPluginRecord = {
           ...record,
           manifest: verified.manifest,
