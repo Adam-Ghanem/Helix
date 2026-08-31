@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, realpath, rename, rm } from 'node:fs/promises';
+import { link, lstat, mkdir, open, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import type { ManagedPluginArtifactRecord } from './store.js';
 
@@ -55,7 +55,9 @@ export class PluginArtifactStore {
       const temporaryBytes = await readRegularFile(temporary, this.maxBytes);
       assertDigest(temporaryBytes, digest);
       try {
-        await rename(temporary, destination);
+        // Hard-link publication is atomic within the same directory and never
+        // replaces an already-published content-addressed blob.
+        await link(temporary, destination);
       } catch (error) {
         if (!isAlreadyExists(error)) throw error;
       }
