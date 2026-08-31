@@ -69,6 +69,37 @@ test('adapter failure fires on-failure and durable resume increments attempt', a
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('durable resume continues a native adapter sessionRef instead of starting a new thread', async () => {
+  const { directory, store } = await setup();
+  try {
+    let runs = 0;
+    const resumedRefs: string[] = [];
+    const adapter: CodingAgentAdapter = {
+      name: 'native',
+      available: async () => true,
+      run: async () => {
+        runs += 1;
+        return { adapter: 'native', success: false, output: 'needs retry', sessionRef: 'native-thread-1', changedFiles: [], commands: [], error: 'retry' };
+      },
+      resume: async (sessionRef) => {
+        resumedRefs.push(sessionRef);
+        return { adapter: 'native', success: true, output: 'continued', sessionRef, changedFiles: [], commands: [] };
+      },
+    };
+    const harness = new CodingHarness({ store, hooks: new HookEngine(), adapter, reviewer: approvedReview, tester: passedTests, judge: acceptedJudge });
+    const failed = await harness.run({ goal: 'continue native thread', cwd: directory });
+    assert.equal(failed.status, 'failed');
+
+    const resumed = await harness.resume(failed.id);
+
+    assert.equal(resumed.status, 'completed');
+    assert.equal(runs, 1);
+    assert.deepEqual(resumedRefs, ['native-thread-1']);
+    const adapterEvidence = (await store.evidenceForSession(failed.id)).filter((record) => record.type === 'adapter-output');
+    assert.equal(adapterEvidence.length, 2);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('quality gates reject failed tests, high findings, and low-confidence judges', async () => {
   const cases = [
     { reviewer: approvedReview, tester: async () => ({ passed: false, commands: [{ command: 'pnpm test', exitCode: 1, durationMs: 1 }], summary: 'failed' }), judge: acceptedJudge },
