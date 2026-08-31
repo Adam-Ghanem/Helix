@@ -108,7 +108,7 @@ export class HighAvailabilityDistributedCoordinator {
   async runTask(taskId: string, now?: number): Promise<FederationResult> {
     const at = now ?? Date.now();
     const leader = await this.requireLeadership(now);
-    await this.store.expireStaleNodes(this.heartbeatTimeoutMs, at);
+    await this.store.expireStaleNodes(leader, this.heartbeatTimeoutMs, at);
     await this.store.recoverExpiredTaskLeases(leader, at);
 
     const task = await this.store.getTask(taskId);
@@ -172,7 +172,7 @@ export class HighAvailabilityDistributedCoordinator {
   async recover(now?: number): Promise<HaRecoveryResult> {
     const at = now ?? Date.now();
     const leader = await this.requireLeadership(now);
-    await this.store.expireStaleNodes(this.heartbeatTimeoutMs, at);
+    await this.store.expireStaleNodes(leader, this.heartbeatTimeoutMs, at);
     const recoveredTasks = await this.store.recoverExpiredTaskLeases(leader, at);
     const results = await this.runPending(now);
     return { recoveredTasks, results };
