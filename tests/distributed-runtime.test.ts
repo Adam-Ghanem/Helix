@@ -82,7 +82,7 @@ test('distributed coordinator takes over an expired lease on another healthy nod
     await state.init();
     const calls: Array<{ nodeId: string; attempt: number; leaseId: string }> = [];
     const dispatcher = {
-      async dispatchTask(input: { endpoint: string; task: FederationTask }): Promise<FederationResult> {
+      async dispatchTaskResult(input: { endpoint: string; task: FederationTask }): Promise<FederationResult> {
         const nodeId = input.task.assignedNodeId!;
         const leaseId = input.task.leaseId!;
         calls.push({ nodeId, attempt: input.task.attempt, leaseId });
@@ -145,7 +145,7 @@ test('distributed coordinator refuses a new lease after max attempts', async () 
     await state.init();
     const coordinator = new DistributedRuntimeCoordinator({
       state,
-      client: { async dispatchTask() { throw new Error('worker disconnected'); } },
+      client: { async dispatchTaskResult() { throw new Error('worker disconnected'); } },
       leaseMs: 1_000,
       heartbeatTimeoutMs: 5_000,
       maxAttempts: 1,

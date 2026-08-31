@@ -86,3 +86,7 @@ export class PluginRegistry {
     return createHash('sha256').update(canonical).digest('hex');
   }
 }
+
+export * from './manifest.js';
+export * from './store.js';
+export * from './manager.js';

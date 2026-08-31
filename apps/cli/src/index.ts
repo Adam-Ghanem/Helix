@@ -30,6 +30,7 @@ import { DurableLearningEngine } from '../../../packages/learning/src/index.js';
 import { HelixRuntime, HttpModelProvider } from '../../../packages/runtime/src/index.js';
 import { SandboxManager } from '../../../packages/sandbox/src/index.js';
 import { DurableTaskQueue } from '../../../packages/workers/src/index.js';
+import { handlePluginCommand } from './plugins.js';
 
 const args = process.argv.slice(2);
 const jsonOutput = args.includes('--json');
@@ -46,7 +47,7 @@ function print(value: unknown): void {
 }
 
 function help(): void {
-  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--background] [--json]\n  helix code run <goal> [--adapter <name>] [--json]\n  helix code resume <session-id> [--adapter <name>] [--json]\n  helix code session <session-id> [--json]\n  helix code sessions [--json]\n  helix hooks list [--json]\n  helix hooks run <event> --session <id> [--payload <json>] [--json]\n  helix sandbox status [--json]\n  helix daemon <start|status|stop> [--json]\n  helix jobs [--json]\n  helix job <id> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
+  console.log(`HELIX — Coordinate Intelligence\n\nUsage:\n  helix run <goal> [--background] [--json]\n  helix code run <goal> [--adapter <name>] [--json]\n  helix code resume <session-id> [--adapter <name>] [--json]\n  helix code session <session-id> [--json]\n  helix code sessions [--json]\n  helix hooks list [--json]\n  helix hooks run <event> --session <id> [--payload <json>] [--json]\n  helix plugins list [--json]\n  helix plugins inspect <id> [--json]\n  helix plugins install <manifest.json> [--json]\n  helix plugins enable <id> [--json]\n  helix plugins disable <id> [--json]\n  helix plugins remove <id> [--json]\n  helix sandbox status [--json]\n  helix daemon <start|status|stop> [--json]\n  helix jobs [--json]\n  helix job <id> [--json]\n  helix agents [--json]\n  helix events [--json]\n  helix execution <id> <pause|resume|cancel|retry|checkpoint> [--json]\n  helix approvals [list|approve|deny] [id] [--json]\n  helix verify [--json]\n  helix recover [--json]\n  helix benchmark [--agents N] [--json]`);
 }
 
 async function main(): Promise<void> {
@@ -56,6 +57,7 @@ async function main(): Promise<void> {
   if (command === 'daemon') return handleDaemonCommand();
   if (command === 'jobs' || command === 'job') return handleJobCommand(command);
   if (command === 'sandbox') return handleSandboxCommand();
+  if (command === 'plugins') return print(await handlePluginCommand(args, dataDirectory));
 
   await runtime.init();
   if (command === 'code') return handleCodeCommand();
