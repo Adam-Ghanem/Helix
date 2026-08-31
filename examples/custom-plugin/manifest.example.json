@@ -1,0 +1,28 @@
+{
+  "id": "reviewer",
+  "name": "Reviewer",
+  "version": "1.0.0",
+  "apiVersion": "v1",
+  "permissions": [
+    "skill:register"
+  ],
+  "capabilities": [
+    "analysis"
+  ],
+  "entrypoint": "./plugin.js",
+  "artifactDigest": "<64-char-sha256-hex>",
+  "signerKeyId": "publisher-main",
+  "signature": "<base64-ed25519-signature>",
+  "contributions": {
+    "skills": [
+      {
+        "name": "review",
+        "description": "Review a change and report concrete findings.",
+        "instructions": "Inspect the supplied change, identify correctness and security risks, and return evidence-backed findings.",
+        "requiredCapabilities": [
+          "analysis"
+        ]
+      }
+    ]
+  }
+}
