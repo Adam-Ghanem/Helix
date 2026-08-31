@@ -14,6 +14,7 @@ const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_FRAME_BYTES = 1_048_576;
 const DEFAULT_MAX_RESTARTS = 3;
+const MAX_PENDING_REQUESTS = 16;
 
 export interface PluginWorkerSandboxFactoryInput {
   pluginId: string;
@@ -79,25 +80,19 @@ export class PluginWorkerManager {
     this.maxRestarts = nonNegativeInteger(options.maxRestarts ?? DEFAULT_MAX_RESTARTS, 'maxRestarts');
   }
 
-  async start(pluginId: string, manifest: ManagedPluginManifest, artifact: ManagedPluginArtifactRecord): Promise<void> {
-    if (!pluginId.trim()) throw new Error('Plugin worker id is required');
-    if (manifest.id !== pluginId) throw new Error(`Plugin worker manifest id mismatch: expected ${pluginId}, received ${manifest.id}`);
+  async preflight(pluginId: string, manifest: ManagedPluginManifest, artifact: ManagedPluginArtifactRecord): Promise<void> {
     if (this.workers.has(pluginId)) throw new Error(`Plugin worker already started: ${pluginId}`);
+    const state = this.newState(pluginId, manifest, artifact);
+    try {
+      await this.launch(state);
+    } finally {
+      await this.closeDetachedState(state);
+    }
+  }
 
-    const state: WorkerState = {
-      pluginId,
-      manifest: structuredClone(manifest),
-      artifact: structuredClone(artifact),
-      session: undefined,
-      pending: new Map(),
-      restartCount: 0,
-      stopping: false,
-      circuitOpen: false,
-      lastFailure: undefined,
-      launchPromise: undefined,
-      unsubscribeLine: undefined,
-      unsubscribeExit: undefined,
-    };
+  async start(pluginId: string, manifest: ManagedPluginManifest, artifact: ManagedPluginArtifactRecord): Promise<void> {
+    if (this.workers.has(pluginId)) throw new Error(`Plugin worker already started: ${pluginId}`);
+    const state = this.newState(pluginId, manifest, artifact);
     this.workers.set(pluginId, state);
     try {
       await this.launch(state);
@@ -138,10 +133,7 @@ export class PluginWorkerManager {
     state.stopping = true;
     state.circuitOpen = true;
     this.rejectPending(state, new Error(`Plugin worker stopped: ${pluginId}`));
-    state.unsubscribeLine?.();
-    state.unsubscribeExit?.();
-    state.unsubscribeLine = undefined;
-    state.unsubscribeExit = undefined;
+    this.unsubscribe(state);
     const session = state.session;
     state.session = undefined;
     try {
@@ -149,6 +141,29 @@ export class PluginWorkerManager {
     } finally {
       this.workers.delete(pluginId);
     }
+  }
+
+  async stopAll(): Promise<void> {
+    for (const pluginId of [...this.workers.keys()]) await this.stop(pluginId);
+  }
+
+  private newState(pluginId: string, manifest: ManagedPluginManifest, artifact: ManagedPluginArtifactRecord): WorkerState {
+    if (!pluginId.trim()) throw new Error('Plugin worker id is required');
+    if (manifest.id !== pluginId) throw new Error(`Plugin worker manifest id mismatch: expected ${pluginId}, received ${manifest.id}`);
+    return {
+      pluginId,
+      manifest: structuredClone(manifest),
+      artifact: structuredClone(artifact),
+      session: undefined,
+      pending: new Map(),
+      restartCount: 0,
+      stopping: false,
+      circuitOpen: false,
+      lastFailure: undefined,
+      launchPromise: undefined,
+      unsubscribeLine: undefined,
+      unsubscribeExit: undefined,
+    };
   }
 
   private requireState(pluginId: string): WorkerState {
@@ -228,8 +243,15 @@ export class PluginWorkerManager {
   private request(state: WorkerState, method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
     const session = state.session;
     if (!session) return Promise.reject(this.unhealthyError(state));
-    const effectiveTimeout = positiveInteger(timeoutMs, 'timeoutMs');
+    if (state.pending.size >= MAX_PENDING_REQUESTS) {
+      return Promise.reject(new Error(`Plugin worker pending request limit exceeded: ${MAX_PENDING_REQUESTS}`));
+    }
+    const effectiveTimeout = Math.min(this.requestTimeoutMs, positiveInteger(timeoutMs, 'timeoutMs'));
     const id = randomUUID();
+    const frame = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+    if (Buffer.byteLength(frame, 'utf8') > this.maxFrameBytes) {
+      return Promise.reject(new Error(`Plugin worker request frame exceeds ${this.maxFrameBytes} bytes: ${method}`));
+    }
 
     return new Promise((resolvePromise, reject) => {
       const timer = setTimeout(() => {
@@ -242,7 +264,6 @@ export class PluginWorkerManager {
       }, effectiveTimeout);
       state.pending.set(id, { resolve: resolvePromise, reject, timer });
 
-      const frame = JSON.stringify({ jsonrpc: '2.0', id, method, params });
       session.writeLine(frame).catch((error) => {
         const pending = state.pending.get(id);
         if (!pending) return;
@@ -299,10 +320,7 @@ export class PluginWorkerManager {
 
   private handleExit(state: WorkerState, result: SandboxSessionExit): void {
     state.session = undefined;
-    state.unsubscribeLine?.();
-    state.unsubscribeExit?.();
-    state.unsubscribeLine = undefined;
-    state.unsubscribeExit = undefined;
+    this.unsubscribe(state);
     if (state.stopping) return;
 
     const details = result.error ?? (result.stderr.trim() || `exit code ${result.exitCode}${result.signal ? ` (${result.signal})` : ''}`);
@@ -318,12 +336,16 @@ export class PluginWorkerManager {
     this.rejectPending(state, error);
     const session = state.session;
     state.session = undefined;
+    this.unsubscribe(state);
+    session?.kill();
+    if (state.restartCount >= this.maxRestarts) state.circuitOpen = true;
+  }
+
+  private unsubscribe(state: WorkerState): void {
     state.unsubscribeLine?.();
     state.unsubscribeExit?.();
     state.unsubscribeLine = undefined;
     state.unsubscribeExit = undefined;
-    session?.kill();
-    if (state.restartCount >= this.maxRestarts) state.circuitOpen = true;
   }
 
   private rejectPending(state: WorkerState, error: Error): void {
@@ -353,13 +375,24 @@ export class PluginWorkerManager {
     return new Error(`Plugin worker circuit is open or worker is unhealthy: ${state.pluginId}${suffix}`);
   }
 
+  private async closeDetachedState(state: WorkerState): Promise<void> {
+    state.stopping = true;
+    this.rejectPending(state, new Error(`Plugin worker preflight completed: ${state.pluginId}`));
+    this.unsubscribe(state);
+    const session = state.session;
+    state.session = undefined;
+    if (!session) return;
+    try {
+      await session.close();
+    } catch {
+      session.kill();
+    }
+  }
+
   private async cleanupFailedStart(state: WorkerState): Promise<void> {
     state.stopping = true;
     this.rejectPending(state, new Error(`Plugin worker failed to start: ${state.pluginId}`));
-    state.unsubscribeLine?.();
-    state.unsubscribeExit?.();
-    state.unsubscribeLine = undefined;
-    state.unsubscribeExit = undefined;
+    this.unsubscribe(state);
     const session = state.session;
     state.session = undefined;
     if (session) {
