@@ -30,9 +30,9 @@ function signedManifest(permissions: string[] = ['skill:register']) {
     artifactDigest: createHash('sha256').update('reviewer-artifact').digest('hex'),
     signerKeyId: 'publisher-main',
     signature: '',
-    contributions: permissions.includes('skill:register')
-      ? { skills: [{ name: 'review', description: 'Review code', instructions: 'Inspect the change and report concrete findings.' }] }
-      : undefined,
+    ...(permissions.includes('skill:register') ? {
+      contributions: { skills: [{ name: 'review', description: 'Review code', instructions: 'Inspect the change and report concrete findings.' }] },
+    } : {}),
   };
   manifest.signature = sign(null, managedPluginSigningPayload(manifest), privateKey).toString('base64');
   return {
