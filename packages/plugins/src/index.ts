@@ -92,3 +92,4 @@ export * from './store.js';
 export * from './artifacts.js';
 export * from './manager.js';
 export * from './worker.js';
+export * from './sandbox.js';
