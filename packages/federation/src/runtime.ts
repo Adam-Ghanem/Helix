@@ -3,12 +3,16 @@ import { DurableFederationState } from './state.js';
 import { FederationRouter } from './router.js';
 
 export interface FederationTaskDispatcher {
+  dispatchTask(input: { endpoint: string; task: FederationTask }): Promise<FederationResult>;
+}
+
+export interface FederationTaskResultDispatcher {
   dispatchTaskResult(input: { endpoint: string; task: FederationTask }): Promise<FederationResult>;
 }
 
 export interface DistributedRuntimeCoordinatorOptions {
   state: DurableFederationState;
-  client: FederationTaskDispatcher;
+  client: FederationTaskResultDispatcher;
   router?: FederationRouter;
   leaseMs?: number;
   heartbeatTimeoutMs?: number;
@@ -30,7 +34,7 @@ export interface DistributedRecoveryResult {
 
 export class DistributedRuntimeCoordinator {
   private readonly state: DurableFederationState;
-  private readonly client: FederationTaskDispatcher;
+  private readonly client: FederationTaskResultDispatcher;
   private readonly router: FederationRouter;
   private readonly leaseMs: number;
   private readonly heartbeatTimeoutMs: number;
