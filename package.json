@@ -21,8 +21,12 @@
     "benchmark": "pnpm exec tsc -p tsconfig.json && node benchmarks/runtime.mjs",
     "golden-demo": "pnpm exec tsc -p tsconfig.json && node examples/golden-demo.mjs"
   },
+  "dependencies": {
+    "pg": "^8.23.0"
+  },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/pg": "^8.23.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

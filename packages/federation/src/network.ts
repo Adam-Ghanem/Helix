@@ -254,7 +254,7 @@ export class FederationHttpClient {
     return { nodeId: message.payload.nodeId, acceptedNodeId: message.payload.acceptedNodeId };
   }
 
-  async dispatchTask(input: { endpoint: string; task: FederationTask }): Promise<FederationResult> {
+  async dispatchTaskResult(input: { endpoint: string; task: FederationTask }): Promise<FederationResult> {
     await this.state.init();
     if (!/^https?:\/\//.test(input.endpoint)) throw new Error('Federation endpoint must use http(s)');
     const targetNodeId = input.task.assignedNodeId;
@@ -268,11 +268,15 @@ export class FederationHttpClient {
     if (result.taskId !== input.task.id || result.executionId !== input.task.executionId || result.nodeId !== targetNodeId) {
       throw new Error('Federation result does not match dispatched task');
     }
-
-    if (input.task.leaseId) {
-      if (result.leaseId !== input.task.leaseId || result.attempt !== input.task.attempt) throw new Error('Federation result fencing token does not match dispatched lease');
-      return this.state.commitLeasedResult(result);
+    if (input.task.leaseId && (result.leaseId !== input.task.leaseId || result.attempt !== input.task.attempt)) {
+      throw new Error('Federation result fencing token does not match dispatched lease');
     }
+    return structuredClone(result);
+  }
+
+  async dispatchTask(input: { endpoint: string; task: FederationTask }): Promise<FederationResult> {
+    const result = await this.dispatchTaskResult(input);
+    if (input.task.leaseId) return this.state.commitLeasedResult(result);
 
     const durable = await this.state.importResult(result);
     await this.state.updateTask(input.task.id, {
@@ -312,6 +316,18 @@ export class FederationHttpClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+}
+
+export class FederationHaHttpDispatcher {
+  private readonly client: FederationHttpClient;
+
+  constructor(client: FederationHttpClient) {
+    this.client = client;
+  }
+
+  async dispatchTask(input: { endpoint: string; task: FederationTask }): Promise<FederationResult> {
+    return this.client.dispatchTaskResult(input);
   }
 }
 
