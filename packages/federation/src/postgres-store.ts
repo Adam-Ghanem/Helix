@@ -18,6 +18,8 @@ export interface PostgresFederationStoreOptions {
   pool?: Pool;
 }
 
+type Queryable = Pick<Pool, 'query'> | Pick<PoolClient, 'query'>;
+
 interface LeaderRow {
   cluster_id: string;
   leader_id: string;
@@ -331,17 +333,20 @@ export class PostgresFederationStore implements FederationHaStore {
     return nodeFromRow(result.rows[0]!);
   }
 
-  async expireStaleNodes(timeoutMs: number, now = Date.now()): Promise<FederationNode[]> {
+  async expireStaleNodes(lease: FederationLeaderLease, timeoutMs: number, now = Date.now()): Promise<FederationNode[]> {
     this.assertInitialized();
     validateLeaseDuration(timeoutMs, 'heartbeat timeout');
-    const result = await this.pool.query<NodeRow>(
-      `UPDATE helix_federation_nodes
-       SET status = 'offline'
-       WHERE cluster_id = $1 AND status = 'online' AND (last_heartbeat IS NULL OR last_heartbeat < $2)
-       RETURNING id, endpoint, capabilities, status, last_heartbeat, load`,
-      [this.clusterId, new Date(now - timeoutMs)],
-    );
-    return result.rows.map(nodeFromRow);
+    return this.transaction(async (client) => {
+      await this.lockAndAssertLeadership(client, lease, now);
+      const result = await client.query<NodeRow>(
+        `UPDATE helix_federation_nodes
+         SET status = 'offline'
+         WHERE cluster_id = $1 AND status = 'online' AND (last_heartbeat IS NULL OR last_heartbeat < $2)
+         RETURNING id, endpoint, capabilities, status, last_heartbeat, load`,
+        [this.clusterId, new Date(now - timeoutMs)],
+      );
+      return result.rows.map(nodeFromRow);
+    });
   }
 
   async claimTask(lease: FederationLeaderLease, taskId: string, nodeId: string, options: HaTaskLeaseOptions): Promise<HaTaskClaim> {
