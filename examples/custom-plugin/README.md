@@ -1,34 +1,36 @@
 # Governed plugin example
 
-Helix managed plugins are manifest-first and fail closed. This phase supports durable lifecycle state, Ed25519 manifest signatures, explicit install policy, namespaced contributions, and data-only skills.
+Helix managed plugins are manifest-first and fail closed. They support durable lifecycle state, Ed25519 manifest signatures, explicit install policy, namespaced contributions, data-only skills/agents, and strictly isolated executable tool/hook workers.
 
-Helix does **not** dynamically import or execute the `entrypoint` from a third-party plugin in the coordinator process. The `entrypoint` field is signed metadata in this phase. Executable plugin code belongs in the follow-up isolated-worker/RPC runtime.
+Helix never dynamically imports, evaluates, or requires third-party plugin code in the coordinator process. Executable tool and hook contributions run only through the isolated worker RPC boundary.
 
 ## Manifest lifecycle
 
-1. Build the manifest and compute a SHA-256 value for the artifact/package descriptor you intend to identify.
-2. Put that hex digest in `artifactDigest`.
-3. Set a stable `signerKeyId` that maps to a trusted Ed25519 public key.
-4. Sign Helix's canonical managed-plugin signing payload with the corresponding Ed25519 private key and store the Base64 signature in `signature`.
-5. Configure explicit trust and install policy in the Helix process.
-6. Install the manifest. Installation stores it as `installed` but exposes no contributions.
-7. Enable the plugin. Helix re-verifies the signature and policy before registering contributions.
-8. Disable or remove the plugin to withdraw its owned contributions.
+1. Bundle executable plugin code into exactly one regular `.js` or `.mjs` file (maximum 8 MiB).
+2. Compute SHA-256 over the exact artifact bytes and put the lowercase hex digest in `artifactDigest`.
+3. Set `entrypoint` to the artifact path relative to the manifest JSON file.
+4. Set a stable `signerKeyId` that maps to a trusted Ed25519 public key.
+5. Sign Helix's canonical managed-plugin signing payload with the corresponding Ed25519 private key and store the Base64 signature in `signature`.
+6. Configure explicit trust and install policy in the Helix process.
+7. Install the manifest. For executable plugins, Helix resolves the entrypoint relative to the manifest, verifies the exact digest, rejects symlinks/non-regular files, and stores immutable content-addressed bytes under `${HELIX_DATA_DIR}/plugins-artifacts/sha256`.
+8. Enable the plugin. Helix re-verifies manifest policy and artifact bytes, requires strict Linux Bubblewrap isolation, performs a worker handshake, and persists `enabled` only after preflight succeeds.
+9. Disable or remove the plugin to withdraw its owned contributions.
 
 The example manifest uses placeholders and is not directly installable until its digest and signature are replaced with real values.
 
 ## CLI configuration
 
-The CLI reads plugin state under `${HELIX_DATA_DIR}/plugins` and uses these environment variables:
+The CLI uses these environment variables:
 
 - `HELIX_PLUGIN_TRUST_KEYS`: JSON object mapping signer key IDs to PEM-encoded Ed25519 public keys.
 - `HELIX_PLUGIN_ALLOWED_PERMISSIONS`: comma-separated permission allowlist.
 - `HELIX_PLUGIN_ALLOWED_CAPABILITIES`: comma-separated capability allowlist.
 - `HELIX_PLUGIN_ALLOWED_API_VERSIONS`: comma-separated managed-plugin API version allowlist.
+- `HELIX_PLUGIN_NODE_EXECUTABLE`: optional absolute Node executable path; defaults to the Helix process Node executable.
 
-No permission, capability, API version, or signer is allowed implicitly.
+No signer, API version, capability, permission, network access, or unsafe host fallback is allowed implicitly. There is intentionally no plugin unsafe-fallback environment switch.
 
-Example policy for the data-only skill manifest:
+Example policy for a data-only skill plugin:
 
 ```sh
 export HELIX_PLUGIN_TRUST_KEYS='{"publisher-main":"-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----"}'
@@ -57,12 +59,44 @@ Managed contributions are always namespaced:
 - agents: `plugin:<pluginId>:agent:<name>`
 - skills: `plugin:<pluginId>:skill:<name>`
 
-Skills contain instructions and requirements only. They do not contain executable code.
+Skills and agents are data-only and start no worker. Tools and hooks are executable and use the worker boundary unless a trusted host-supplied handler explicitly takes precedence.
 
-Tool and hook contributions require a trusted host-provided handler resolver. The standalone CLI intentionally does not resolve arbitrary third-party handlers, so enabling a tool/hook plugin through the CLI alone fails closed instead of executing an entrypoint.
+## Isolation and artifact boundary
 
-## Artifact integrity boundary
+Executable plugins require Linux Bubblewrap. Helix binds only the re-verified managed artifact read-only at `/plugin/worker.mjs`; plugin scratch state is writable only in a plugin-specific `/workspace`. Runtime paths are read-only, the environment is allowlisted, output and request sizes are bounded, and no unsafe process fallback is accepted for plugin execution.
 
-`artifactDigest` is part of the signed manifest and protects the declared artifact identity from undetected manifest tampering. This phase does not open the artifact or execute it, so it does not claim runtime verification of executable artifact bytes.
+Network is disabled by default. It is enabled only when the signed manifest contains `network:egress` and the installation policy explicitly allows that permission.
 
-The next plugin phase will bind the signed digest to an isolated executable artifact and run it behind a strict sandboxed worker/RPC boundary.
+Helix verifies managed artifact bytes again before every worker launch or restart. Tampering after installation fails closed.
+
+## JSONL worker protocol v1
+
+`worker.example.mjs` shows the minimal protocol. The worker reads one JSON-RPC 2.0 object per stdin line and writes exactly one correlated response per stdout line. Frames are capped at 1 MiB and the coordinator bounds pending requests, timeouts, and crash restarts.
+
+Handshake request:
+
+```json
+{"jsonrpc":"2.0","id":"<request-id>","method":"plugin/handshake","params":{"pluginId":"reviewer","apiVersion":"v1"}}
+```
+
+Handshake response:
+
+```json
+{"jsonrpc":"2.0","id":"<request-id>","result":{"protocolVersion":"1","pluginId":"reviewer","capabilities":{"tools":true,"hooks":true}}}
+```
+
+Tool call:
+
+```json
+{"jsonrpc":"2.0","id":"<request-id>","method":"tool/call","params":{"name":"inspect","input":{"text":"hello"}}}
+```
+
+Hook call:
+
+```json
+{"jsonrpc":"2.0","id":"<request-id>","method":"hook/call","params":{"name":"audit","event":"pre-tool","context":{}}}
+```
+
+Responses must use the matching string `id` and contain exactly one of `result` or `error`. Protocol violations, malformed JSON, unknown response IDs, oversized frames, and request timeouts terminate the worker session. Unexpected crashes permit at most three lazy restarts per manager instance before the circuit opens.
+
+The worker receives only protocol metadata such as `HELIX_PLUGIN_ID` and `HELIX_PLUGIN_PROTOCOL_VERSION`; arbitrary host secrets are not inherited.
