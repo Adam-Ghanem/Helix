@@ -47,15 +47,15 @@ interface WorkerState {
   pluginId: string;
   manifest: ManagedPluginManifest;
   artifact: ManagedPluginArtifactRecord;
-  session?: SandboxSession;
+  session: SandboxSession | undefined;
   pending: Map<string, PendingRequest>;
   restartCount: number;
   stopping: boolean;
   circuitOpen: boolean;
-  lastFailure?: string;
-  launchPromise?: Promise<void>;
-  unsubscribeLine?: () => void;
-  unsubscribeExit?: () => void;
+  lastFailure: string | undefined;
+  launchPromise: Promise<void> | undefined;
+  unsubscribeLine: (() => void) | undefined;
+  unsubscribeExit: (() => void) | undefined;
 }
 
 export class PluginWorkerManager {
@@ -88,10 +88,15 @@ export class PluginWorkerManager {
       pluginId,
       manifest: structuredClone(manifest),
       artifact: structuredClone(artifact),
+      session: undefined,
       pending: new Map(),
       restartCount: 0,
       stopping: false,
       circuitOpen: false,
+      lastFailure: undefined,
+      launchPromise: undefined,
+      unsubscribeLine: undefined,
+      unsubscribeExit: undefined,
     };
     this.workers.set(pluginId, state);
     try {
@@ -300,7 +305,7 @@ export class PluginWorkerManager {
     state.unsubscribeExit = undefined;
     if (state.stopping) return;
 
-    const details = result.error ?? result.stderr.trim() || `exit code ${result.exitCode}${result.signal ? ` (${result.signal})` : ''}`;
+    const details = result.error ?? (result.stderr.trim() || `exit code ${result.exitCode}${result.signal ? ` (${result.signal})` : ''}`);
     const error = new Error(`Plugin worker exited: ${state.pluginId}: ${details}`);
     state.lastFailure = error.message;
     this.rejectPending(state, error);
