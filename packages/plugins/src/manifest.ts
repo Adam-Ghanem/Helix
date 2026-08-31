@@ -1,11 +1,13 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import type { HookEventName } from '../../hooks/src/index.js';
-import type { ToolSchema } from '../../tools/src/index.js';
+import type { JsonType, ToolSchema } from '../../tools/src/index.js';
 import type { PluginManifest, PluginPermission, PluginPolicy } from './index.js';
 
 const PLUGIN_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{1,63}$/;
 const CONTRIBUTION_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const SHA256_PATTERN = /^[a-fA-F0-9]{64}$/;
+const HOOK_EVENTS = new Set<HookEventName>(['session-start', 'session-end', 'pre-task', 'post-task', 'pre-edit', 'post-edit', 'pre-command', 'post-command', 'pre-tool', 'post-tool', 'on-failure', 'pre-review', 'post-review']);
+const JSON_TYPES = new Set<JsonType>(['string', 'number', 'boolean', 'object', 'array']);
 
 export interface PluginToolContribution {
   name: string;
@@ -99,12 +101,7 @@ export function verifyManagedManifest(
   if (!trustedKey?.trim()) throw new Error(`Plugin signer is not trusted: ${manifest.signerKeyId}`);
   if (!manifest.signature.trim()) throw new Error('Plugin signature is required');
 
-  let signature: Buffer;
-  try {
-    signature = Buffer.from(manifest.signature, 'base64');
-  } catch {
-    throw new Error('Plugin signature is not valid base64');
-  }
+  const signature = Buffer.from(manifest.signature, 'base64');
   if (!signature.length) throw new Error('Plugin signature is required');
 
   let valid = false;
@@ -122,68 +119,124 @@ export function verifyManagedManifest(
 }
 
 function validateManagedShape(manifest: ManagedPluginManifest, policy: PluginInstallPolicy): void {
-  if (!PLUGIN_ID_PATTERN.test(manifest.id)) throw new Error('Invalid plugin id');
-  if (!manifest.name.trim() || !manifest.version.trim() || !manifest.entrypoint.trim()) throw new Error('Plugin manifest is incomplete');
-  if (!manifest.apiVersion.trim() || !policy.allowedApiVersions.includes(manifest.apiVersion)) throw new Error(`Plugin API version denied: ${manifest.apiVersion}`);
-  if (!SHA256_PATTERN.test(manifest.artifactDigest)) throw new Error('Plugin artifactDigest must be a SHA-256 hex digest');
-  if (!manifest.signerKeyId.trim()) throw new Error('Plugin signerKeyId is required');
-  if (!Array.isArray(manifest.permissions)) throw new Error('Plugin permissions must be an array');
+  const raw = manifest as unknown;
+  if (!isRecord(raw)) throw new Error('Plugin manifest must be a JSON object');
 
-  for (const permission of manifest.permissions) {
+  const pluginId = requireNonEmptyString(raw.id, 'id');
+  if (!PLUGIN_ID_PATTERN.test(pluginId)) throw new Error('Invalid plugin id');
+  requireNonEmptyString(raw.name, 'name');
+  requireNonEmptyString(raw.version, 'version');
+  const apiVersion = requireNonEmptyString(raw.apiVersion, 'apiVersion');
+  requireNonEmptyString(raw.entrypoint, 'entrypoint');
+  const artifactDigest = requireNonEmptyString(raw.artifactDigest, 'artifactDigest');
+  requireNonEmptyString(raw.signerKeyId, 'signerKeyId');
+  requireNonEmptyString(raw.signature, 'signature');
+
+  if (!policy.allowedApiVersions.includes(apiVersion)) throw new Error(`Plugin API version denied: ${apiVersion}`);
+  if (!SHA256_PATTERN.test(artifactDigest)) throw new Error('Plugin artifactDigest must be a SHA-256 hex digest');
+  if (raw.integrity !== undefined && typeof raw.integrity !== 'string') throw new Error('Plugin manifest integrity must be a string');
+
+  const permissions = requireStringArray(raw.permissions, 'permissions');
+  const capabilities = optionalStringArray(raw.capabilities, 'capabilities');
+  optionalStringArray(raw.tools, 'tools');
+  for (const permission of permissions) {
     if (!policy.allowedPermissions.includes(permission)) throw new Error(`Plugin permission denied: ${permission}`);
   }
   if (policy.allowedCapabilities) {
-    for (const capability of manifest.capabilities ?? []) {
+    for (const capability of capabilities) {
       if (!policy.allowedCapabilities.includes(capability)) throw new Error(`Plugin capability denied: ${capability}`);
     }
   }
 
   const max = policy.maxContributionsPerKind ?? 64;
   if (!Number.isInteger(max) || max < 0) throw new Error('maxContributionsPerKind must be a non-negative integer');
-  validateContributions(manifest.contributions, max, manifest.permissions);
+  validateContributions(raw.contributions, max, permissions);
 }
 
-function validateContributions(contributions: PluginContributionSet | undefined, max: number, permissions: PluginPermission[]): void {
-  if (!contributions) return;
-  const checks: Array<[keyof PluginContributionSet, PluginPermission]> = [
-    ['tools', 'tool:register'],
-    ['hooks', 'hook:register'],
-    ['agents', 'agent:register'],
-    ['skills', 'skill:register'],
-  ];
-  for (const [kind, requiredPermission] of checks) {
-    const items = contributions[kind] ?? [];
-    if (items.length > max) throw new Error(`Plugin contribution limit exceeded: ${String(kind)}`);
-    if (items.length && !permissions.includes(requiredPermission)) throw new Error(`Plugin permission denied: ${requiredPermission}`);
+function validateContributions(value: unknown, max: number, permissions: PluginPermission[]): void {
+  if (value === undefined) return;
+  if (!isRecord(value)) throw new Error('Plugin contributions must be an object');
+  const contributionPermissions: Record<keyof PluginContributionSet, PluginPermission> = {
+    tools: 'tool:register',
+    hooks: 'hook:register',
+    agents: 'agent:register',
+    skills: 'skill:register',
+  };
+
+  for (const kind of Object.keys(contributionPermissions) as Array<keyof PluginContributionSet>) {
+    const rawItems = value[kind];
+    if (rawItems === undefined) continue;
+    if (!Array.isArray(rawItems)) throw new Error(`Plugin contributions ${kind} must be an array`);
+    if (rawItems.length > max) throw new Error(`Plugin contribution limit exceeded: ${kind}`);
+    if (rawItems.length && !permissions.includes(contributionPermissions[kind])) throw new Error(`Plugin permission denied: ${contributionPermissions[kind]}`);
     const seen = new Set<string>();
-    for (const item of items) {
-      if (!CONTRIBUTION_NAME_PATTERN.test(item.name)) throw new Error(`Invalid plugin contribution name: ${item.name}`);
-      if (seen.has(item.name)) throw new Error(`Duplicate plugin contribution: ${String(kind)}:${item.name}`);
-      seen.add(item.name);
+    for (const rawItem of rawItems) {
+      if (!isRecord(rawItem)) throw new Error(`Plugin contribution ${kind} entry must be an object`);
+      const name = requireNonEmptyString(rawItem.name, `${kind}.name`);
+      if (!CONTRIBUTION_NAME_PATTERN.test(name)) throw new Error(`Invalid plugin contribution name: ${name}`);
+      if (seen.has(name)) throw new Error(`Duplicate plugin contribution: ${kind}:${name}`);
+      seen.add(name);
     }
   }
 
-  for (const tool of contributions.tools ?? []) {
-    if (!tool.description.trim()) throw new Error(`Plugin tool description is required: ${tool.name}`);
-    if (!['low', 'medium', 'high'].includes(tool.risk)) throw new Error(`Invalid plugin tool risk: ${tool.name}`);
-    for (const permission of tool.permissions) {
-      if (!permissions.includes(permission)) throw new Error(`Plugin tool permission denied: ${permission}`);
+  for (const rawTool of optionalRecordArray(value.tools, 'tools')) validateTool(rawTool, permissions);
+  for (const rawHook of optionalRecordArray(value.hooks, 'hooks')) validateHook(rawHook);
+  for (const rawAgent of optionalRecordArray(value.agents, 'agents')) validateAgent(rawAgent, permissions);
+  for (const rawSkill of optionalRecordArray(value.skills, 'skills')) validateSkill(rawSkill);
+}
+
+function validateTool(tool: Record<string, unknown>, permissions: PluginPermission[]): void {
+  const name = requireNonEmptyString(tool.name, 'tools.name');
+  requireNonEmptyString(tool.description, `tool ${name} description`);
+  if (tool.risk !== 'low' && tool.risk !== 'medium' && tool.risk !== 'high') throw new Error(`Invalid plugin tool risk: ${name}`);
+  const toolPermissions = requireStringArray(tool.permissions, `tool ${name} permissions`);
+  for (const permission of toolPermissions) {
+    if (!permissions.includes(permission)) throw new Error(`Plugin tool permission denied: ${permission}`);
+  }
+  validateToolSchema(tool.inputSchema, name);
+}
+
+function validateToolSchema(value: unknown, toolName: string): void {
+  if (!isRecord(value)) throw new Error(`Plugin tool inputSchema must be an object: ${toolName}`);
+  if (value.required !== undefined) requireStringArray(value.required, `tool ${toolName} inputSchema.required`);
+  if (value.properties !== undefined) {
+    if (!isRecord(value.properties)) throw new Error(`Plugin tool inputSchema.properties must be an object: ${toolName}`);
+    for (const [field, type] of Object.entries(value.properties)) {
+      if (typeof type !== 'string' || !JSON_TYPES.has(type as JsonType)) throw new Error(`Invalid plugin tool schema type for ${toolName}.${field}`);
     }
   }
-  for (const hook of contributions.hooks ?? []) {
-    if (!hook.events.length) throw new Error(`Plugin hook must subscribe to an event: ${hook.name}`);
-    if (!Number.isFinite(hook.priority)) throw new Error(`Plugin hook priority must be finite: ${hook.name}`);
-    if (!Number.isFinite(hook.timeoutMs) || hook.timeoutMs <= 0) throw new Error(`Plugin hook timeout must be greater than zero: ${hook.name}`);
+}
+
+function validateHook(hook: Record<string, unknown>): void {
+  const name = requireNonEmptyString(hook.name, 'hooks.name');
+  const events = requireStringArray(hook.events, `hook ${name} events`);
+  if (!events.length) throw new Error(`Plugin hook must subscribe to an event: ${name}`);
+  for (const event of events) if (!HOOK_EVENTS.has(event as HookEventName)) throw new Error(`Invalid plugin hook event: ${event}`);
+  if (typeof hook.priority !== 'number' || !Number.isFinite(hook.priority)) throw new Error(`Plugin hook priority must be finite: ${name}`);
+  if (typeof hook.critical !== 'boolean') throw new Error(`Plugin hook critical must be boolean: ${name}`);
+  if (typeof hook.timeoutMs !== 'number' || !Number.isFinite(hook.timeoutMs) || hook.timeoutMs <= 0) throw new Error(`Plugin hook timeout must be greater than zero: ${name}`);
+  if (hook.alwaysRun !== undefined && typeof hook.alwaysRun !== 'boolean') throw new Error(`Plugin hook alwaysRun must be boolean: ${name}`);
+}
+
+function validateAgent(agent: Record<string, unknown>, permissions: PluginPermission[]): void {
+  const name = requireNonEmptyString(agent.name, 'agents.name');
+  requireNonEmptyString(agent.role, `agent ${name} role`);
+  const capabilities = requireStringArray(agent.capabilities, `agent ${name} capabilities`);
+  if (!capabilities.length) throw new Error(`Plugin agent capabilities are required: ${name}`);
+  const agentPermissions = optionalStringArray(agent.permissions, `agent ${name} permissions`);
+  for (const permission of agentPermissions) {
+    if (!permissions.includes(permission)) throw new Error(`Plugin agent permission denied: ${permission}`);
   }
-  for (const agent of contributions.agents ?? []) {
-    if (!agent.role.trim() || !agent.capabilities.length) throw new Error(`Plugin agent is incomplete: ${agent.name}`);
-    for (const permission of agent.permissions ?? []) {
-      if (!permissions.includes(permission)) throw new Error(`Plugin agent permission denied: ${permission}`);
-    }
-  }
-  for (const skill of contributions.skills ?? []) {
-    if (!skill.description.trim() || !skill.instructions.trim()) throw new Error(`Plugin skill is incomplete: ${skill.name}`);
-  }
+  if (agent.model !== undefined && (typeof agent.model !== 'string' || !agent.model.trim())) throw new Error(`Plugin agent model must be a non-empty string: ${name}`);
+  if (agent.provider !== undefined && (typeof agent.provider !== 'string' || !agent.provider.trim())) throw new Error(`Plugin agent provider must be a non-empty string: ${name}`);
+}
+
+function validateSkill(skill: Record<string, unknown>): void {
+  const name = requireNonEmptyString(skill.name, 'skills.name');
+  requireNonEmptyString(skill.description, `skill ${name} description`);
+  requireNonEmptyString(skill.instructions, `skill ${name} instructions`);
+  optionalStringArray(skill.requiredTools, `skill ${name} requiredTools`);
+  optionalStringArray(skill.requiredCapabilities, `skill ${name} requiredCapabilities`);
 }
 
 function normalizeManagedManifest(manifest: ManagedPluginManifest): ManagedPluginManifest {
@@ -214,6 +267,33 @@ function canonicalContributionSet(input: PluginContributionSet | undefined): unk
     agents: (input.agents ?? []).map((agent) => ({ ...agent, capabilities: canonicalSet(agent.capabilities), permissions: canonicalSet(agent.permissions ?? []) })),
     skills: (input.skills ?? []).map((skill) => ({ ...skill, requiredTools: canonicalSet(skill.requiredTools ?? []), requiredCapabilities: canonicalSet(skill.requiredCapabilities ?? []) })),
   };
+}
+
+function requireNonEmptyString(value: unknown, field: string): string {
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`Plugin manifest ${field} must be a non-empty string`);
+  return value;
+}
+
+function requireStringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string' && item.trim().length > 0)) {
+    throw new Error(`Plugin manifest ${field} must be a string array`);
+  }
+  return value;
+}
+
+function optionalStringArray(value: unknown, field: string): string[] {
+  if (value === undefined) return [];
+  return requireStringArray(value, field);
+}
+
+function optionalRecordArray(value: unknown, field: string): Array<Record<string, unknown>> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every(isRecord)) throw new Error(`Plugin contributions ${field} must be an array of objects`);
+  return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 function canonicalSet<T extends string>(values: readonly T[]): T[] {
