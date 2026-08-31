@@ -18,8 +18,6 @@ export interface PostgresFederationStoreOptions {
   pool?: Pool;
 }
 
-type Queryable = Pick<Pool, 'query'> | Pick<PoolClient, 'query'>;
-
 interface LeaderRow {
   cluster_id: string;
   leader_id: string;
@@ -90,69 +88,87 @@ export class PostgresFederationStore implements FederationHaStore {
 
   async init(): Promise<void> {
     if (this.initialized) return;
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS helix_federation_leader (
-        cluster_id text PRIMARY KEY,
-        leader_id text NOT NULL,
-        term bigint NOT NULL CHECK (term >= 1),
-        fencing_token text NOT NULL,
-        heartbeat_at timestamptz NOT NULL,
-        expires_at timestamptz NOT NULL
-      );
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // CREATE TABLE IF NOT EXISTS is not sufficient when two fresh processes bootstrap
+      // the same schema concurrently: PostgreSQL catalog type creation can still race.
+      // A transaction-scoped advisory lock serializes schema bootstrap across hosts.
+      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [121250107, 1]);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS helix_federation_leader (
+          cluster_id text PRIMARY KEY,
+          leader_id text NOT NULL,
+          term bigint NOT NULL CHECK (term >= 1),
+          fencing_token text NOT NULL,
+          heartbeat_at timestamptz NOT NULL,
+          expires_at timestamptz NOT NULL
+        );
 
-      CREATE TABLE IF NOT EXISTS helix_federation_nodes (
-        cluster_id text NOT NULL,
-        id text NOT NULL,
-        endpoint text NOT NULL,
-        capabilities jsonb NOT NULL,
-        status text NOT NULL CHECK (status IN ('online', 'offline', 'quarantined')),
-        last_heartbeat timestamptz,
-        load double precision NOT NULL DEFAULT 0 CHECK (load >= 0),
-        PRIMARY KEY (cluster_id, id)
-      );
+        CREATE TABLE IF NOT EXISTS helix_federation_nodes (
+          cluster_id text NOT NULL,
+          id text NOT NULL,
+          endpoint text NOT NULL,
+          capabilities jsonb NOT NULL,
+          status text NOT NULL CHECK (status IN ('online', 'offline', 'quarantined')),
+          last_heartbeat timestamptz,
+          load double precision NOT NULL DEFAULT 0 CHECK (load >= 0),
+          PRIMARY KEY (cluster_id, id)
+        );
 
-      CREATE TABLE IF NOT EXISTS helix_federation_tasks (
-        cluster_id text NOT NULL,
-        id text NOT NULL,
-        execution_id text NOT NULL,
-        task_type text NOT NULL,
-        goal text NOT NULL,
-        required_capabilities jsonb NOT NULL,
-        payload jsonb NOT NULL,
-        assigned_node_id text,
-        lease_id text,
-        lease_expires_at timestamptz,
-        status text NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
-        attempt integer NOT NULL DEFAULT 0 CHECK (attempt >= 0),
-        created_at timestamptz NOT NULL,
-        updated_at timestamptz NOT NULL,
-        error text,
-        leader_term bigint,
-        leader_fencing_token text,
-        PRIMARY KEY (cluster_id, id)
-      );
+        CREATE TABLE IF NOT EXISTS helix_federation_tasks (
+          cluster_id text NOT NULL,
+          id text NOT NULL,
+          execution_id text NOT NULL,
+          task_type text NOT NULL,
+          goal text NOT NULL,
+          required_capabilities jsonb NOT NULL,
+          payload jsonb NOT NULL,
+          assigned_node_id text,
+          lease_id text,
+          lease_expires_at timestamptz,
+          status text NOT NULL CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+          attempt integer NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+          created_at timestamptz NOT NULL,
+          updated_at timestamptz NOT NULL,
+          error text,
+          leader_term bigint,
+          leader_fencing_token text,
+          PRIMARY KEY (cluster_id, id)
+        );
 
-      CREATE UNIQUE INDEX IF NOT EXISTS helix_federation_tasks_active_lease
-        ON helix_federation_tasks(cluster_id, lease_id)
-        WHERE lease_id IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS helix_federation_tasks_active_lease
+          ON helix_federation_tasks(cluster_id, lease_id)
+          WHERE lease_id IS NOT NULL;
 
-      CREATE TABLE IF NOT EXISTS helix_federation_results (
-        cluster_id text NOT NULL,
-        id text NOT NULL,
-        task_id text NOT NULL,
-        execution_id text NOT NULL,
-        node_id text NOT NULL,
-        lease_id text,
-        attempt integer NOT NULL CHECK (attempt >= 0),
-        success boolean NOT NULL,
-        output jsonb,
-        error text,
-        created_at timestamptz NOT NULL,
-        PRIMARY KEY (cluster_id, id),
-        UNIQUE (cluster_id, task_id, attempt)
-      );
-    `);
-    this.initialized = true;
+        CREATE TABLE IF NOT EXISTS helix_federation_results (
+          cluster_id text NOT NULL,
+          id text NOT NULL,
+          task_id text NOT NULL,
+          execution_id text NOT NULL,
+          node_id text NOT NULL,
+          lease_id text,
+          attempt integer NOT NULL CHECK (attempt >= 0),
+          success boolean NOT NULL,
+          output jsonb,
+          error text,
+          created_at timestamptz NOT NULL,
+          PRIMARY KEY (cluster_id, id),
+          UNIQUE (cluster_id, task_id, attempt)
+        );
+      `);
+      await client.query('COMMIT');
+      this.initialized = true;
+    } catch (error) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Preserve the schema bootstrap error.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async close(): Promise<void> {
