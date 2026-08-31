@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import type { HelixRuntime } from '../../../packages/runtime/src/index.js';
+import { parseLimit, parseSequence, readEventsAfter } from './events.js';
 import { createHttpHelpers, type HttpSecurityOptions } from './http.js';
 
 export interface HelixRequestHandlerOptions {
@@ -141,7 +142,9 @@ export function createHelixRequestHandler(options: HelixRequestHandlerOptions): 
         return;
       }
       if (url.pathname === '/api/v1/events' && request.method === 'GET') {
-        http.json(response, 200, { events: await runtime.events.read() });
+        const after = parseSequence(queryValue(url.searchParams, 'after'), 'after');
+        const limit = parseLimit(queryValue(url.searchParams, 'limit'), { defaultValue: 200, max: 1_000 });
+        http.json(response, 200, await readEventsAfter(runtime.events, after, limit));
         return;
       }
       if (url.pathname === '/api/v1/recover' && request.method === 'POST') {
@@ -164,7 +167,7 @@ export function createHelixRequestHandler(options: HelixRequestHandlerOptions): 
         return;
       }
       const message = error instanceof Error ? error.message : String(error);
-      const status = error instanceof SyntaxError || /unknown|not found|exceeds|invalid|already|not failed|JSON|body/i.test(message) ? 400 : 500;
+      const status = error instanceof SyntaxError || /unknown|not found|exceeds|invalid|already|not failed|JSON|body|safe integer|limit|after/i.test(message) ? 400 : 500;
       http.json(response, status, { error: message });
     }
   };
@@ -196,4 +199,9 @@ async function serveDashboardAsset(
 
 function statusFilter(value: string | null): 'pending' | 'approved' | 'denied' | 'expired' | undefined {
   return value === 'pending' || value === 'approved' || value === 'denied' || value === 'expired' ? value : undefined;
+}
+
+function queryValue(searchParams: URLSearchParams, name: string): string | undefined {
+  const value = searchParams.get(name);
+  return value === null ? undefined : value;
 }
