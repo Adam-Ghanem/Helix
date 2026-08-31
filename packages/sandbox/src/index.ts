@@ -118,7 +118,7 @@ export interface ExecutableSandbox {
   readonly isolated: boolean;
   execute(command: string, args: string[], cwd?: string, environment?: Record<string, string>): Promise<SandboxExecutionResult>;
   executeRequest(request: SandboxExecutionRequest): Promise<SandboxExecutionResult>;
-  spawnSession(request: SandboxSessionRequest): Promise<SandboxSession>;
+  spawnSession?: (request: SandboxSessionRequest) => Promise<SandboxSession>;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
