@@ -84,7 +84,7 @@ export function managedPluginSigningPayload(manifest: ManagedPluginManifest): Bu
     tools: canonicalSet(manifest.tools ?? []),
     entrypoint: manifest.entrypoint,
     integrity: manifest.integrity ?? null,
-    artifactDigest: manifest.artifactDigest,
+    artifactDigest: manifest.artifactDigest.toLowerCase(),
     signerKeyId: manifest.signerKeyId,
     contributions: canonicalContributionSet(manifest.contributions),
   };
