@@ -140,6 +140,8 @@ export class PluginWorkerManager {
     state.session = undefined;
     try {
       await session?.close();
+    } catch {
+      session?.kill();
     } finally {
       this.workers.delete(pluginId);
     }
