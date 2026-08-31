@@ -151,7 +151,6 @@ export class DurablePluginManager {
     this.assertInitialized();
     return this.serialize(async () => {
       const current = this.requireRecord(id);
-      if (current.status === 'enabled') this.rollback(current.registrations);
       if (current.status === 'disabled') return cloneRecord(current);
 
       const next: ManagedPluginRecord = {
@@ -161,6 +160,7 @@ export class DurablePluginManager {
         registrations: emptyRegistrations(),
       };
       const stored = await this.store.put(next);
+      if (current.status === 'enabled') this.rollback(current.registrations);
       this.records.set(id, cloneRecord(stored));
       return cloneRecord(stored);
     });
@@ -170,9 +170,9 @@ export class DurablePluginManager {
     this.assertInitialized();
     await this.serialize(async () => {
       const current = this.requireRecord(id);
-      if (current.status === 'enabled') this.rollback(current.registrations);
       const removed = await this.store.remove(id);
       if (!removed) throw new Error(`Unknown plugin: ${id}`);
+      if (current.status === 'enabled') this.rollback(current.registrations);
       this.records.delete(id);
     });
   }
