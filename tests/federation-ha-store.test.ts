@@ -71,3 +71,18 @@ test('memory HA store rejects stale leader result commits after takeover', async
     /stale leader/i,
   );
 });
+
+test('memory HA store requires the current leader to expire stale nodes', async () => {
+  const store = new MemoryFederationHaStore({ clusterId: 'cluster-node-expiry' });
+  await store.init();
+  const a = (await store.acquireLeadership('a', { ttlMs: 20, now: 1_000 })).lease!;
+  await store.heartbeatNode({ id: 'worker', endpoint: 'https://worker.example', capabilities: ['coding'], load: 0 }, 1_000);
+  const b = (await store.acquireLeadership('b', { ttlMs: 100, now: 1_021 })).lease!;
+
+  await assert.rejects(() => store.expireStaleNodes(a, 10, 1_021), /stale leader/i);
+  assert.equal((await store.listNodes())[0]?.status, 'online');
+
+  const expired = await store.expireStaleNodes(b, 10, 1_021);
+  assert.equal(expired.length, 1);
+  assert.equal((await store.listNodes())[0]?.status, 'offline');
+});
