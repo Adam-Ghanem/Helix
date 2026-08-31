@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isAbsolute, resolve } from 'node:path';
 import type {
   ExecutableSandbox,
   SandboxSession,
@@ -73,7 +74,8 @@ export class PluginWorkerManager {
     this.artifacts = options.artifacts;
     this.sandboxFactory = options.sandboxFactory;
     if (!options.nodeExecutable.trim()) throw new Error('Plugin worker nodeExecutable is required');
-    this.nodeExecutable = options.nodeExecutable;
+    if (!isAbsolute(options.nodeExecutable)) throw new Error('Plugin worker Node executable must be absolute');
+    this.nodeExecutable = resolve(options.nodeExecutable);
     this.handshakeTimeoutMs = positiveInteger(options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS, 'handshakeTimeoutMs');
     this.requestTimeoutMs = positiveInteger(options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, 'requestTimeoutMs');
     this.maxFrameBytes = positiveInteger(options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES, 'maxFrameBytes');
@@ -311,8 +313,13 @@ export class PluginWorkerManager {
       return;
     }
     if (hasError) {
-      const remote = isRecord(value.error) && typeof value.error.message === 'string' ? value.error.message : 'remote worker error';
-      pending.reject(new Error(`Plugin worker error: ${remote}`));
+      if (!isRecord(value.error) || typeof value.error.message !== 'string' || !value.error.message.trim()) {
+        const error = new Error('Plugin worker protocol error response must contain an error object with a non-empty message');
+        pending.reject(error);
+        this.failSession(state, error);
+        return;
+      }
+      pending.reject(new Error(`Plugin worker error: ${value.error.message}`));
       return;
     }
     pending.resolve(value.result);
