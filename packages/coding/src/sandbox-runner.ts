@@ -2,10 +2,12 @@ import type { ExecutableSandbox } from '../../sandbox/src/index.js';
 import type { BoundedProcessRequest, BoundedProcessResult, ProcessRunner } from './process.js';
 
 export class SandboxProcessRunner implements ProcessRunner {
+  readonly isolated: boolean;
   private readonly sandbox: ExecutableSandbox;
 
   constructor(options: { sandbox: ExecutableSandbox }) {
     this.sandbox = options.sandbox;
+    this.isolated = options.sandbox.isolated;
   }
 
   async run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
