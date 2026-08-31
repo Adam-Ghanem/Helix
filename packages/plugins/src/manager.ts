@@ -102,11 +102,12 @@ export class DurablePluginManager {
           throw new Error(`Plugin durable manifest digest mismatch: ${record.manifest.id}`);
         }
 
+        const executable = hasExecutableContributions(verified.manifest);
         const artifact = await this.verifyDurableArtifact(record, verified.manifest);
         let registrations = emptyRegistrations();
         let workerStarted = false;
         if (record.status === 'enabled') {
-          if (this.workers) {
+          if (this.workers && executable) {
             await this.workers.start(record.manifest.id, verified.manifest, requireArtifact(record.manifest.id, artifact));
             workerStarted = true;
           }
@@ -126,6 +127,7 @@ export class DurablePluginManager {
           updatedAt: new Date().toISOString(),
           ...(artifact ? { artifact } : {}),
         };
+        if (!artifact && 'artifact' in next) delete next.artifact;
         await this.store.put(next);
         this.records.set(record.manifest.id, cloneRecord(next));
       }
@@ -171,12 +173,13 @@ export class DurablePluginManager {
 
       const verified = verifyManagedManifest(current.manifest, this.trust, this.policy);
       if (verified.manifestDigest !== current.manifestDigest) throw new Error(`Plugin durable manifest digest mismatch: ${id}`);
+      const executable = hasExecutableContributions(verified.manifest);
       const artifact = await this.verifyDurableArtifact(current, verified.manifest);
 
       let registrations: ManagedPluginRegistrations | undefined;
       let workerStarted = false;
       try {
-        if (this.workers) {
+        if (this.workers && executable) {
           await this.workers.start(id, verified.manifest, requireArtifact(id, artifact));
           workerStarted = true;
         }
@@ -189,6 +192,7 @@ export class DurablePluginManager {
           registrations,
           ...(artifact ? { artifact } : {}),
         };
+        if (!artifact && 'artifact' in next) delete next.artifact;
         const stored = await this.store.put(next);
         this.records.set(id, cloneRecord(stored));
         return cloneRecord(stored);
@@ -215,7 +219,7 @@ export class DurablePluginManager {
       const stored = await this.store.put(next);
       if (current.status === 'enabled') {
         this.rollback(current.registrations);
-        if (this.workers) await this.workers.stop(id);
+        if (this.workers && hasExecutableContributions(current.manifest)) await this.workers.stop(id);
       }
       this.records.set(id, cloneRecord(stored));
       return cloneRecord(stored);
@@ -230,7 +234,7 @@ export class DurablePluginManager {
       if (!removed) throw new Error(`Unknown plugin: ${id}`);
       if (current.status === 'enabled') {
         this.rollback(current.registrations);
-        if (this.workers) await this.workers.stop(id);
+        if (this.workers && hasExecutableContributions(current.manifest)) await this.workers.stop(id);
       }
       this.records.delete(id);
     });
@@ -268,6 +272,7 @@ export class DurablePluginManager {
   }
 
   private async installArtifact(manifest: ManagedPluginManifest, artifactSourcePath: string | undefined): Promise<ManagedPluginArtifactRecord | undefined> {
+    if (!hasExecutableContributions(manifest)) return undefined;
     if (!this.artifacts) {
       if (artifactSourcePath !== undefined) throw new Error('Plugin artifact source requires worker mode');
       return undefined;
@@ -277,6 +282,7 @@ export class DurablePluginManager {
   }
 
   private async verifyDurableArtifact(record: ManagedPluginRecord, manifest: ManagedPluginManifest): Promise<ManagedPluginArtifactRecord | undefined> {
+    if (!hasExecutableContributions(manifest)) return undefined;
     if (!this.artifacts) return record.artifact ? { ...record.artifact } : undefined;
     const artifact = requireArtifact(manifest.id, record.artifact);
     return this.artifacts.verify(artifact, manifest.artifactDigest);
@@ -337,13 +343,17 @@ export class DurablePluginManager {
   }
 
   private async resolveToolHandler(pluginId: string, contribution: PluginToolContribution): Promise<ToolDefinition['handler'] | undefined> {
+    const trustedHandler = await this.handlers.tool?.(pluginId, structuredClone(contribution));
+    if (trustedHandler) return trustedHandler;
     if (this.workers) {
       return async (input: Record<string, unknown>) => this.workers!.callTool(pluginId, contribution.name, structuredClone(input));
     }
-    return this.handlers.tool?.(pluginId, structuredClone(contribution));
+    return undefined;
   }
 
   private async resolveHookHandler(pluginId: string, contribution: PluginHookContribution): Promise<HookDefinition['handler'] | undefined> {
+    const trustedHandler = await this.handlers.hook?.(pluginId, structuredClone(contribution));
+    if (trustedHandler) return trustedHandler;
     if (this.workers) {
       const hookId = namespaced(pluginId, 'hook', contribution.name);
       return async (context: HookContext): Promise<HookResult> => {
@@ -357,7 +367,7 @@ export class DurablePluginManager {
         return validateWorkerHookResult(result, hookId);
       };
     }
-    return this.handlers.hook?.(pluginId, structuredClone(contribution));
+    return undefined;
   }
 
   private rollback(registrations: ManagedPluginRegistrations): void {
@@ -390,6 +400,10 @@ export class DurablePluginManager {
     this.operationChain = run.then(() => undefined, () => undefined);
     return run;
   }
+}
+
+function hasExecutableContributions(manifest: ManagedPluginManifest): boolean {
+  return (manifest.contributions?.tools?.length ?? 0) > 0 || (manifest.contributions?.hooks?.length ?? 0) > 0;
 }
 
 function namespaced(pluginId: string, kind: 'tool' | 'hook' | 'agent' | 'skill', name: string): string {
