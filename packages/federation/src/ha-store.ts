@@ -49,7 +49,7 @@ export interface FederationHaStore {
   listTasks(): Promise<FederationHaTask[]>;
   listNodes(): Promise<FederationNode[]>;
   heartbeatNode(input: FederationNodeHeartbeat, now?: number): Promise<FederationNode>;
-  expireStaleNodes(timeoutMs: number, now?: number): Promise<FederationNode[]>;
+  expireStaleNodes(lease: FederationLeaderLease, timeoutMs: number, now?: number): Promise<FederationNode[]>;
   claimTask(lease: FederationLeaderLease, taskId: string, nodeId: string, options: HaTaskLeaseOptions): Promise<HaTaskClaim>;
   renewTaskLease(lease: FederationLeaderLease, leaseId: string, nodeId: string, options: HaTaskLeaseOptions): Promise<HaTaskClaim>;
   recoverExpiredTaskLeases(lease: FederationLeaderLease, now?: number): Promise<FederationHaTask[]>;
@@ -174,10 +174,10 @@ export class MemoryFederationHaStore implements FederationHaStore {
     });
   }
 
-  async expireStaleNodes(timeoutMs: number, now = Date.now()): Promise<FederationNode[]> {
+  async expireStaleNodes(lease: FederationLeaderLease, timeoutMs: number, now = Date.now()): Promise<FederationNode[]> {
     return this.serial(async () => {
-      this.assertInitialized();
       if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('Heartbeat timeout must be greater than zero');
+      this.assertLeaderUnsafe(lease, now);
       const expired: FederationNode[] = [];
       for (const node of this.nodes.values()) {
         if (node.status !== 'online') continue;
