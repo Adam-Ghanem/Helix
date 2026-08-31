@@ -34,10 +34,12 @@ export interface BoundedProcessResult {
 }
 
 export interface ProcessRunner {
+  readonly isolated?: boolean;
   run(request: BoundedProcessRequest): Promise<BoundedProcessResult>;
 }
 
 export class BoundedProcessRunner implements ProcessRunner {
+  readonly isolated = false;
   private readonly options: Required<BoundedProcessRunnerOptions>;
 
   constructor(options: BoundedProcessRunnerOptions) {
