@@ -89,4 +89,5 @@ export class PluginRegistry {
 
 export * from './manifest.js';
 export * from './store.js';
+export * from './artifacts.js';
 export * from './manager.js';
