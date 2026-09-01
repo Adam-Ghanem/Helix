@@ -248,7 +248,8 @@ async function mutateApproval(approvalId, action) {
     const approvals = await api.json('/approvals?status=pending');
     state = applySnapshot(state, { approvals });
     render();
-    showNotice(`Approval ${action}d.`, 'success');
+    const decision = action === 'approve' ? 'approved' : 'denied';
+    showNotice(`Approval ${decision}.`, 'success');
   } catch (error) {
     showNotice(`Approval action failed: ${messageOf(error)}`, 'error');
   } finally {
