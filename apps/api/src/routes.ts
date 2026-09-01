@@ -120,8 +120,16 @@ export function createHelixRequestHandler(options: HelixRequestHandlerOptions): 
         return;
       }
       if (url.pathname === '/api/v1/executions' && request.method === 'GET') {
-        const events = await runtime.events.read((event) => event.type === 'execution.started');
-        http.json(response, 200, { executions: events.map((event) => (event.payload as { execution: unknown }).execution) });
+        const events = await runtime.events.read((event) => Boolean(event.executionId));
+        const current = new Map<string, unknown>();
+        for (const event of events) {
+          const execution = (event.payload as { execution?: unknown }).execution;
+          if (!execution || typeof execution !== 'object') continue;
+          const executionId = (execution as { id?: unknown }).id;
+          if (typeof executionId !== 'string' || !executionId) continue;
+          current.set(executionId, structuredClone(execution));
+        }
+        http.json(response, 200, { executions: [...current.values()] });
         return;
       }
 
