@@ -100,3 +100,26 @@ test('execution list returns current durable lifecycle state instead of the exec
     assert.deepEqual(listed.result, completed.result);
   });
 });
+
+test('dashboard assets ship strict browser security headers compatible with same-origin live controls', async () => {
+  await withApi({}, async (baseUrl) => {
+    for (const path of ['/', '/dashboard/app.js', '/dashboard/styles.css']) {
+      const response = await fetch(`${baseUrl}${path}`);
+      assert.equal(response.status, 200);
+      const csp = response.headers.get('content-security-policy') ?? '';
+      assert.match(csp, /default-src 'self'/);
+      assert.match(csp, /script-src 'self'/);
+      assert.match(csp, /style-src 'self'/);
+      assert.match(csp, /connect-src 'self'/);
+      assert.match(csp, /object-src 'none'/);
+      assert.match(csp, /base-uri 'none'/);
+      assert.match(csp, /frame-ancestors 'none'/);
+      assert.match(csp, /form-action 'none'/);
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(response.headers.get('x-frame-options'), 'DENY');
+      assert.equal(response.headers.get('referrer-policy'), 'no-referrer');
+      assert.equal(response.headers.get('permissions-policy'), 'camera=(), microphone=(), geolocation=()');
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+    }
+  });
+});
