@@ -25,6 +25,14 @@ const DASHBOARD_ASSETS: Readonly<Record<string, { relativePath: string; contentT
   '/dashboard/styles.css': { relativePath: 'src/styles.css', contentType: 'text/css; charset=utf-8' },
 });
 
+const DASHBOARD_SECURITY_HEADERS = Object.freeze({
+  'content-security-policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+  'referrer-policy': 'no-referrer',
+  'permissions-policy': 'camera=(), microphone=(), geolocation=()',
+});
+
 export function createHelixRequestHandler(options: HelixRequestHandlerOptions): HelixRequestHandler {
   const { runtime, dashboardRoot } = options;
   const http = createHttpHelpers(options.security);
@@ -203,12 +211,18 @@ async function serveDashboardAsset(
     response.writeHead(200, {
       'content-type': asset.contentType,
       'cache-control': 'no-store',
+      ...DASHBOARD_SECURITY_HEADERS,
       ...corsHeaders,
     });
     response.end(contents);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', ...corsHeaders });
+      response.writeHead(404, {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+        ...DASHBOARD_SECURITY_HEADERS,
+        ...corsHeaders,
+      });
       response.end('Not found');
       return;
     }
