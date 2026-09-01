@@ -15,6 +15,8 @@ export interface HttpHelpers {
   corsHeaders(): Record<string, string>;
 }
 
+const MAX_RATE_LIMIT_BUCKETS = 10_000;
+
 export function createHttpHelpers(options: HttpSecurityOptions): HttpHelpers {
   const maxBodyBytes = positiveInteger(options.maxBodyBytes, 'maxBodyBytes');
   const rateLimitPerMinute = positiveInteger(options.rateLimitPerMinute, 'rateLimitPerMinute');
@@ -62,15 +64,28 @@ export function createHttpHelpers(options: HttpSecurityOptions): HttpHelpers {
     const address = request.socket.remoteAddress ?? 'unknown';
     const now = Date.now();
     const current = buckets.get(address);
-    if (!current || current.resetAt <= now) {
-      buckets.set(address, { count: 1, resetAt: now + 60_000 });
-      return true;
+    if (current && current.resetAt > now) {
+      current.count += 1;
+      return current.count <= rateLimitPerMinute;
     }
-    current.count += 1;
-    return current.count <= rateLimitPerMinute;
+
+    if (current) buckets.delete(address);
+    if (buckets.size >= MAX_RATE_LIMIT_BUCKETS) {
+      reclaimExpiredBuckets(buckets, now);
+      if (buckets.size >= MAX_RATE_LIMIT_BUCKETS) return false;
+    }
+
+    buckets.set(address, { count: 1, resetAt: now + 60_000 });
+    return true;
   };
 
   return { json, readJsonBody, authorized, withinRateLimit, corsHeaders };
+}
+
+function reclaimExpiredBuckets(buckets: Map<string, { count: number; resetAt: number }>, now: number): void {
+  for (const [address, bucket] of buckets) {
+    if (bucket.resetAt <= now) buckets.delete(address);
+  }
 }
 
 function isPublicPath(pathname: string): boolean {
