@@ -3,36 +3,58 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Helix — Coordinate Intelligence</title>
-  <style>
-    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #0b1020; color: #e5e7eb; }
-    body { margin: 0; padding: 32px; max-width: 1200px; margin-inline: auto; }
-    header { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; border-bottom: 1px solid #26324d; padding-bottom: 20px; }
-    h1 { margin: 0; letter-spacing: .04em; } .muted { color: #94a3b8; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 24px 0; }
-    .card { background: #111a30; border: 1px solid #26324d; border-radius: 12px; padding: 18px; }
-    .value { font-size: 28px; font-weight: 700; margin-top: 8px; }
-    table { width: 100%; border-collapse: collapse; } th, td { text-align: left; padding: 12px 8px; border-bottom: 1px solid #26324d; }
-    code { color: #93c5fd; } button { background: #2563eb; color: white; border: 0; border-radius: 8px; padding: 10px 14px; cursor: pointer; }
-    .error { color: #fca5a5; }
-  </style>
+  <meta name="color-scheme" content="dark" />
+  <title>Helix Operations Console</title>
+  <link rel="stylesheet" href="/dashboard/styles.css" />
 </head>
 <body>
-  <header><div><h1>HELIX</h1><div class="muted">Coordinate Intelligence</div></div><button id="refresh">Refresh</button></header>
-  <section class="grid" id="cards"></section>
-  <section class="card"><h2>Recent executions</h2><div id="table" class="muted">Loading…</div></section>
-  <script>
-    const API = localStorage.getItem('HELIX_API') || 'http://localhost:8787';
-    async function get(path) { const r = await fetch(`${API}/api/v1${path}`); if (!r.ok) throw new Error(`API ${r.status}`); return r.json(); }
-    function card(label, value) { return `<div class="card"><div class="muted">${label}</div><div class="value">${value}</div></div>`; }
-    async function refresh() {
-      try {
-        const [health, agents, executions, events] = await Promise.all([get('/health'), get('/agents'), get('/executions'), get('/events')]);
-        document.querySelector('#cards').innerHTML = [card('Runtime', health.status), card('Provider', health.provider), card('Agents', agents.agents.length), card('Event sequence', health.sequence), card('Executions', executions.executions.length), card('Audit events', events.events.length)].join('');
-        document.querySelector('#table').innerHTML = `<table><thead><tr><th>ID</th><th>Goal</th><th>Status</th><th>Updated</th></tr></thead><tbody>${executions.executions.slice(-20).reverse().map(e => `<tr><td><code>${e.id}</code></td><td>${e.goal}</td><td>${e.status}</td><td>${e.updatedAt}</td></tr>`).join('')}</tbody></table>`;
-      } catch (error) { document.querySelector('#table').innerHTML = `<div class="error">${error.message}. Start the API at ${API}.</div>`; }
-    }
-    document.querySelector('#refresh').addEventListener('click', refresh); refresh();
-  </script>
+  <div class="shell">
+    <aside class="sidebar" aria-label="Helix navigation">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">H</div>
+        <div>
+          <strong>HELIX</strong>
+          <span>Operations Console</span>
+        </div>
+      </div>
+      <nav class="nav" id="navigation">
+        <button class="nav-item active" type="button" data-view="overview">Overview</button>
+        <button class="nav-item" type="button" data-view="executions">Executions</button>
+        <button class="nav-item" type="button" data-view="agents">Agents</button>
+        <button class="nav-item" type="button" data-view="approvals">Approvals</button>
+        <button class="nav-item" type="button" data-view="telemetry">Telemetry</button>
+        <button class="nav-item" type="button" data-view="events">Events</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="connection-dot" class="connection-dot" aria-hidden="true"></span>
+        <div>
+          <strong id="connection-label">Connecting</strong>
+          <span id="sequence-label">Sequence 0</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Durable orchestration runtime</p>
+          <h1 id="view-title">Overview</h1>
+        </div>
+        <div class="topbar-actions">
+          <label class="token-field">
+            <span>API token</span>
+            <input id="api-token" type="password" autocomplete="off" spellcheck="false" placeholder="Memory only" aria-label="Helix API token" />
+          </label>
+          <button id="connect" class="button secondary" type="button">Reconnect</button>
+          <button id="refresh" class="button" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+      <section id="content" class="content" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <script type="module" src="/dashboard/app.js"></script>
 </body>
 </html>
