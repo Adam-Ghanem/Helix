@@ -85,3 +85,18 @@ test('API refactor preserves existing snapshot routes and fixed dashboard paths 
     assert.doesNotMatch(await traversal.text(), /\"name\"\s*:\s*\"helix\"/);
   });
 });
+
+test('execution list returns current durable lifecycle state instead of the execution.started snapshot', async () => {
+  await withApi({}, async (baseUrl, runtime) => {
+    const completed = await runtime.execute({ goal: 'complete the console snapshot test' });
+    assert.equal(completed.status, 'completed');
+
+    const response = await fetch(`${baseUrl}/api/v1/executions`);
+    assert.equal(response.status, 200);
+    const payload = await response.json() as { executions: Array<{ id: string; status: string; result?: unknown }> };
+    const listed = payload.executions.find((execution) => execution.id === completed.id);
+    assert.ok(listed);
+    assert.equal(listed.status, 'completed');
+    assert.deepEqual(listed.result, completed.result);
+  });
+});
